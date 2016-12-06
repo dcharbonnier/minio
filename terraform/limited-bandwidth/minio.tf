@@ -5,7 +5,7 @@ provider "scaleway" {
 
 data "scaleway_image" "docker" {
   architecture = "x86_64"
-  name = "docker"
+  name = "Docker"
 }
 
 resource "scaleway_server" "test" {
