@@ -17,20 +17,12 @@
 package cmd
 
 import (
+	"errors"
 	"net/url"
 	"time"
 
 	"github.com/minio/mc/pkg/console"
 )
-
-// Channel where minioctl heal handler would notify if it were successful. This
-// would be used by waitForFormattingDisks routine to check if it's worth
-// retrying loadAllFormats.
-var globalWakeupCh chan struct{}
-
-func init() {
-	globalWakeupCh = make(chan struct{}, 1)
-}
 
 /*
 
@@ -183,10 +175,20 @@ func prepForInitXL(firstDisk bool, sErrs []error, diskCount int) InitActions {
 	return WaitForQuorum
 }
 
+// Prints retry message upon a specific retry count.
+func printRetryMsg(sErrs []error, storageDisks []StorageAPI) {
+	for i, sErr := range sErrs {
+		switch sErr {
+		case errDiskNotFound, errFaultyDisk, errFaultyRemoteDisk:
+			console.Printf("Disk %s is still unreachable, with error %s\n", storageDisks[i], sErr)
+		}
+	}
+}
+
 // Implements a jitter backoff loop for formatting all disks during
 // initialization of the server.
-func retryFormattingDisks(firstDisk bool, firstEndpoint *url.URL, storageDisks []StorageAPI) error {
-	if firstEndpoint == nil {
+func retryFormattingDisks(firstDisk bool, endpoints []*url.URL, storageDisks []StorageAPI) error {
+	if len(endpoints) == 0 {
 		return errInvalidArgument
 	}
 	if storageDisks == nil {
@@ -199,97 +201,92 @@ func retryFormattingDisks(firstDisk bool, firstEndpoint *url.URL, storageDisks [
 	// Indicate to our routine to exit cleanly upon return.
 	defer close(doneCh)
 
+	// prepare getElapsedTime() to calculate elapsed time since we started trying formatting disks.
+	// All times are rounded to avoid showing milli, micro and nano seconds
+	formatStartTime := time.Now().Round(time.Second)
+	getElapsedTime := func() string {
+		return time.Now().Round(time.Second).Sub(formatStartTime).String()
+	}
+
 	// Wait on the jitter retry loop.
-	for retryCounter := range newRetryTimer(time.Second, time.Second*30, MaxJitter, doneCh) {
-		// Attempt to load all `format.json`.
-		formatConfigs, sErrs := loadAllFormats(storageDisks)
-		if retryCounter > 5 {
-			for i, e := range sErrs {
-				if e == errDiskNotFound {
-					console.Printf("%s still unreachable.\n", storageDisks[i])
-				}
+	retryTimerCh := newRetryTimer(time.Second, time.Second*30, MaxJitter, doneCh)
+	for {
+		select {
+		case retryCount := <-retryTimerCh:
+			// Attempt to load all `format.json` from all disks.
+			formatConfigs, sErrs := loadAllFormats(storageDisks)
+			if retryCount > 5 {
+				// After 5 retry attempts we start printing actual errors
+				// for disks not being available.
+				printRetryMsg(sErrs, storageDisks)
 			}
-		}
-		// Check if this is a XL or distributed XL, anything > 1 is considered XL backend.
-		if len(formatConfigs) > 1 {
+			if len(formatConfigs) == 1 {
+				err := genericFormatCheckFS(formatConfigs[0], sErrs[0])
+				if err != nil {
+					// For an new directory or existing data.
+					if err == errUnformattedDisk || err == errCorruptedFormat {
+						return initFormatFS(storageDisks[0])
+					}
+					return err
+				}
+				return nil
+			} // Check if this is a XL or distributed XL, anything > 1 is considered XL backend.
+			// Pre-emptively check if one of the formatted disks
+			// is invalid. This function returns success for the
+			// most part unless one of the formats is not consistent
+			// with expected XL format. For example if a user is trying
+			// to pool FS backend.
+			if err := checkFormatXLValues(formatConfigs); err != nil {
+				return err
+			}
 			switch prepForInitXL(firstDisk, sErrs, len(storageDisks)) {
 			case Abort:
 				return errCorruptedFormat
 			case FormatDisks:
 				console.Eraseline()
-				printFormatMsg(storageDisks, printOnceFn())
+				printFormatMsg(endpoints, storageDisks, printOnceFn())
 				return initFormatXL(storageDisks)
 			case InitObjectLayer:
 				console.Eraseline()
-				// Validate formats load before proceeding forward.
-				err := genericFormatCheck(formatConfigs, sErrs)
+				// Validate formats loaded before proceeding forward.
+				err := genericFormatCheckXL(formatConfigs, sErrs)
 				if err == nil {
-					printRegularMsg(storageDisks, printOnceFn())
+					printRegularMsg(endpoints, storageDisks, printOnceFn())
 				}
 				return err
 			case WaitForHeal:
-				// Validate formats load before proceeding forward.
-				err := genericFormatCheck(formatConfigs, sErrs)
+				// Validate formats loaded before proceeding forward.
+				err := genericFormatCheckXL(formatConfigs, sErrs)
 				if err == nil {
-					printHealMsg(firstEndpoint.String(), storageDisks, printOnceFn())
+					printHealMsg(endpoints, storageDisks, printOnceFn())
 				}
 				return err
 			case WaitForQuorum:
 				console.Printf(
-					"Initializing data volume. Waiting for minimum %d servers to come online.\n",
-					len(storageDisks)/2+1,
+					"Initializing data volume. Waiting for minimum %d servers to come online. (elapsed %s)\n",
+					len(storageDisks)/2+1, getElapsedTime(),
 				)
 			case WaitForConfig:
 				// Print configuration errors.
 				printConfigErrMsg(storageDisks, sErrs, printOnceFn())
 			case WaitForAll:
-				console.Println("Initializing data volume for first time. Waiting for other servers to come online.")
+				console.Printf("Initializing data volume for first time. Waiting for other servers to come online (elapsed %s)\n", getElapsedTime())
 			case WaitForFormatting:
-				console.Println("Initializing data volume for first time. Waiting for first server to come online.")
+				console.Printf("Initializing data volume for first time. Waiting for first server to come online (elapsed %s)\n", getElapsedTime())
 			}
-			continue
-		} // else We have FS backend now. Check fs format as well now.
-		if isFormatFound(formatConfigs) {
-			console.Eraseline()
-			// Validate formats load before proceeding forward.
-			return genericFormatCheck(formatConfigs, sErrs)
-		} // else initialize the format for FS.
-		return initFormatFS(storageDisks[0])
-	} // Return here.
-	return nil
+		case <-globalServiceDoneCh:
+			return errors.New("Initializing data volumes gracefully stopped")
+		}
+	}
 }
 
 // Initialize storage disks based on input arguments.
-func initStorageDisks(endpoints, ignoredEndpoints []*url.URL) ([]StorageAPI, error) {
-	// Single disk means we will use FS backend.
-	if len(endpoints) == 1 {
-		if endpoints[0] == nil {
-			return nil, errInvalidArgument
-		}
-		storage, err := newStorageAPI(endpoints[0])
-		if err != nil && err != errDiskNotFound {
-			return nil, err
-		}
-		return []StorageAPI{storage}, nil
-	}
-	// Otherwise proceed with XL setup. Bootstrap disks.
+func initStorageDisks(endpoints []*url.URL) ([]StorageAPI, error) {
+	// Bootstrap disks.
 	storageDisks := make([]StorageAPI, len(endpoints))
 	for index, ep := range endpoints {
 		if ep == nil {
 			return nil, errInvalidArgument
-		}
-		// Check if disk is ignored.
-		ignored := false
-		for _, iep := range ignoredEndpoints {
-			if *ep == *iep {
-				ignored = true
-				break
-			}
-		}
-		if ignored {
-			// Set this situation as disk not found.
-			storageDisks[index] = nil
-			continue
 		}
 		// Intentionally ignore disk not found errors. XL is designed
 		// to handle these errors internally.
@@ -303,29 +300,27 @@ func initStorageDisks(endpoints, ignoredEndpoints []*url.URL) ([]StorageAPI, err
 }
 
 // Format disks before initialization object layer.
-func waitForFormatDisks(firstDisk bool, firstEndpoint *url.URL, storageDisks []StorageAPI) (err error) {
+func waitForFormatDisks(firstDisk bool, endpoints []*url.URL, storageDisks []StorageAPI) (formattedDisks []StorageAPI, err error) {
+	if len(endpoints) == 0 {
+		return nil, errInvalidArgument
+	}
+	firstEndpoint := endpoints[0]
 	if firstEndpoint == nil {
-		return errInvalidArgument
+		return nil, errInvalidArgument
 	}
 	if storageDisks == nil {
-		return errInvalidArgument
+		return nil, errInvalidArgument
 	}
 	// Start retry loop retrying until disks are formatted properly, until we have reached
 	// a conditional quorum of formatted disks.
-	err = retryFormattingDisks(firstDisk, firstEndpoint, storageDisks)
+	err = retryFormattingDisks(firstDisk, endpoints, storageDisks)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if firstDisk {
-		// Notify every one else that they can try init again.
-		for _, storage := range storageDisks {
-			switch store := storage.(type) {
-			// Wake up remote storage servers to initiate init again.
-			case networkStorage:
-				var reply GenericReply
-				_ = store.rpcClient.Call("Storage.TryInitHandler", &GenericArgs{}, &reply)
-			}
-		}
+	// Initialize the disk into a formatted disks wrapper.
+	formattedDisks = make([]StorageAPI, len(storageDisks))
+	for i, storage := range storageDisks {
+		formattedDisks[i] = &retryStorage{storage}
 	}
-	return nil
+	return formattedDisks, nil
 }

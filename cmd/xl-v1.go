@@ -18,8 +18,13 @@ package cmd
 
 import (
 	"fmt"
+	"os"
+	"runtime/debug"
 	"sort"
+	"strings"
+	"sync"
 
+	humanize "github.com/dustin/go-humanize"
 	"github.com/minio/minio/pkg/disk"
 	"github.com/minio/minio/pkg/objcache"
 )
@@ -38,8 +43,9 @@ const (
 	// Uploads metadata file carries per multipart object metadata.
 	uploadsJSONFile = "uploads.json"
 
-	// 8GiB cache by default.
-	maxCacheSize = 8 * 1024 * 1024 * 1024
+	// Represents the minimum required RAM size before
+	// we enable caching.
+	minRAMSize = 8 * humanize.GiByte
 
 	// Maximum erasure blocks.
 	maxErasureBlocks = 16
@@ -50,6 +56,7 @@ const (
 
 // xlObjects - Implements XL object layer.
 type xlObjects struct {
+	mutex        *sync.Mutex
 	storageDisks []StorageAPI // Collection of initialized backend disks.
 	dataBlocks   int          // dataBlocks count caculated for erasure.
 	parityBlocks int          // parityBlocks count calculated for erasure.
@@ -67,43 +74,7 @@ type xlObjects struct {
 }
 
 // list of all errors that can be ignored in tree walk operation in XL
-var xlTreeWalkIgnoredErrs = []error{
-	errFileNotFound,
-	errVolumeNotFound,
-	errDiskNotFound,
-	errDiskAccessDenied,
-	errFaultyDisk,
-}
-
-func healFormatXL(storageDisks []StorageAPI) error {
-	// Attempt to load all `format.json`.
-	formatConfigs, sErrs := loadAllFormats(storageDisks)
-
-	// Generic format check validates
-	// if (no quorum) return error
-	// if (disks not recognized) // Always error.
-	if err := genericFormatCheck(formatConfigs, sErrs); err != nil {
-		return err
-	}
-
-	// Handles different cases properly.
-	switch reduceFormatErrs(sErrs, len(storageDisks)) {
-	case errCorruptedFormat:
-		if err := healFormatXLCorruptedDisks(storageDisks); err != nil {
-			return fmt.Errorf("Unable to repair corrupted format, %s", err)
-		}
-	case errSomeDiskUnformatted:
-		// All drives online but some report missing format.json.
-		if err := healFormatXLFreshDisks(storageDisks); err != nil {
-			// There was an unexpected unrecoverable error during healing.
-			return fmt.Errorf("Unable to heal backend %s", err)
-		}
-	case errSomeDiskOffline:
-		// FIXME: in future.
-		return fmt.Errorf("Unable to initialize format %s and %s", errSomeDiskOffline, errSomeDiskUnformatted)
-	}
-	return nil
-}
+var xlTreeWalkIgnoredErrs = append(baseIgnoredErrs, errDiskAccessDenied, errVolumeNotFound, errFileNotFound)
 
 // newXLObjects - initialize new xl object layer.
 func newXLObjects(storageDisks []StorageAPI) (ObjectLayer, error) {
@@ -123,26 +94,49 @@ func newXLObjects(storageDisks []StorageAPI) (ObjectLayer, error) {
 	// Calculate data and parity blocks.
 	dataBlocks, parityBlocks := len(newStorageDisks)/2, len(newStorageDisks)/2
 
-	// Initialize object cache.
-	objCache := objcache.New(globalMaxCacheSize, globalCacheExpiry)
-
 	// Initialize list pool.
 	listPool := newTreeWalkPool(globalLookupTimeout)
 
+	// Check if object cache is disabled.
+	objCacheDisabled := strings.EqualFold(os.Getenv("_MINIO_CACHE"), "off")
+
 	// Initialize xl objects.
-	xl := xlObjects{
-		storageDisks:    newStorageDisks,
-		dataBlocks:      dataBlocks,
-		parityBlocks:    parityBlocks,
-		listPool:        listPool,
-		objCache:        objCache,
-		objCacheEnabled: globalMaxCacheSize > 0,
+	xl := &xlObjects{
+		mutex:        &sync.Mutex{},
+		storageDisks: newStorageDisks,
+		dataBlocks:   dataBlocks,
+		parityBlocks: parityBlocks,
+		listPool:     listPool,
+	}
+
+	// Object cache is enabled when _MINIO_CACHE env is missing.
+	// and cache size is > 0.
+	xl.objCacheEnabled = !objCacheDisabled && globalMaxCacheSize > 0
+
+	// Check if object cache is enabled.
+	if xl.objCacheEnabled {
+		// Initialize object cache.
+		objCache := objcache.New(globalMaxCacheSize, globalCacheExpiry)
+		objCache.OnEviction = func(key string) {
+			debug.FreeOSMemory()
+		}
+		xl.objCache = objCache
+	}
+
+	// Initialize meta volume, if volume already exists ignores it.
+	if err = initMetaVolume(storageDisks); err != nil {
+		return nil, fmt.Errorf("Unable to initialize '.minio.sys' meta volume, %s", err)
 	}
 
 	// Figure out read and write quorum based on number of storage disks.
 	// READ and WRITE quorum is always set to (N/2) number of disks.
 	xl.readQuorum = readQuorum
 	xl.writeQuorum = writeQuorum
+
+	// Do a quick heal on the buckets themselves for any discrepancies.
+	if err := quickHeal(xl.storageDisks, xl.writeQuorum, xl.readQuorum); err != nil {
+		return xl, err
+	}
 
 	// Return successfully initialized object layer.
 	return xl, nil

@@ -18,61 +18,16 @@ package cmd
 
 import (
 	"bytes"
-	"os"
 	"path/filepath"
 	"testing"
 )
-
-// Tests scenarios which can occur for hasExtendedHeader function.
-func TestHasExtendedHeader(t *testing.T) {
-	// All test cases concerning hasExtendedHeader function.
-	testCases := []struct {
-		metadata map[string]string
-		has      bool
-	}{
-		// Verifies if X-Amz-Meta is present.
-		{
-			metadata: map[string]string{
-				"X-Amz-Meta-1": "value",
-			},
-			has: true || os.Getenv("MINIO_ENABLE_FSMETA") == "1",
-		},
-		// Verifies if X-Minio-Meta is present.
-		{
-			metadata: map[string]string{
-				"X-Minio-Meta-1": "value",
-			},
-			has: true || os.Getenv("MINIO_ENABLE_FSMETA") == "1",
-		},
-		// Verifies if extended header is not present.
-		{
-			metadata: map[string]string{
-				"md5Sum": "value",
-			},
-			has: false || os.Getenv("MINIO_ENABLE_FSMETA") == "1",
-		},
-		// Verifies if extended header is not present, but with an empty input.
-		{
-			metadata: nil,
-			has:      false || os.Getenv("MINIO_ENABLE_FSMETA") == "1",
-		},
-	}
-
-	// Validate all test cases.
-	for i, testCase := range testCases {
-		has := hasExtendedHeader(testCase.metadata)
-		if has != testCase.has {
-			t.Fatalf("Test case %d: Expected \"%#v\", but got \"%#v\"", i+1, testCase.has, has)
-		}
-	}
-}
 
 func initFSObjects(disk string, t *testing.T) (obj ObjectLayer) {
 	endpoints, err := parseStorageEndpoints([]string{disk})
 	if err != nil {
 		t.Fatal(err)
 	}
-	obj, _, err = initObjectLayer(endpoints, nil)
+	obj, _, err = initObjectLayer(endpoints)
 	if err != nil {
 		t.Fatal("Unexpected err: ", err)
 	}
@@ -81,7 +36,7 @@ func initFSObjects(disk string, t *testing.T) (obj ObjectLayer) {
 
 // TestReadFsMetadata - readFSMetadata testing with a healthy and faulty disk
 func TestReadFSMetadata(t *testing.T) {
-	disk := filepath.Join(os.TempDir(), "minio-"+nextSuffix())
+	disk := filepath.Join(globalTestTmpDir, "minio-"+nextSuffix())
 	defer removeAll(disk)
 
 	obj := initFSObjects(disk, t)
@@ -117,7 +72,7 @@ func TestReadFSMetadata(t *testing.T) {
 	}
 
 	// Test with corrupted disk
-	fsStorage := fs.storage.(*posix)
+	fsStorage := fs.storage.(*retryStorage)
 	naughty := newNaughtyDisk(fsStorage, nil, errFaultyDisk)
 	fs.storage = naughty
 	if _, err := readFSMetadata(fs.storage, ".minio.sys", fsPath); errorCause(err) != errFaultyDisk {
@@ -128,7 +83,7 @@ func TestReadFSMetadata(t *testing.T) {
 
 // TestWriteFsMetadata - tests of writeFSMetadata with healthy and faulty disks
 func TestWriteFSMetadata(t *testing.T) {
-	disk := filepath.Join(os.TempDir(), "minio-"+nextSuffix())
+	disk := filepath.Join(globalTestTmpDir, "minio-"+nextSuffix())
 	defer removeAll(disk)
 	obj := initFSObjects(disk, t)
 	fs := obj.(fsObjects)
@@ -155,7 +110,7 @@ func TestWriteFSMetadata(t *testing.T) {
 	}
 
 	// Reading metadata with a corrupted disk
-	fsStorage := fs.storage.(*posix)
+	fsStorage := fs.storage.(*retryStorage)
 	for i := 1; i <= 2; i++ {
 		naughty := newNaughtyDisk(fsStorage, map[int]error{i: errFaultyDisk, i + 1: errFaultyDisk}, nil)
 		fs.storage = naughty

@@ -27,9 +27,73 @@ import (
 	"strings"
 	"testing"
 
+	humanize "github.com/dustin/go-humanize"
 	"github.com/minio/minio-go/pkg/policy"
 	"github.com/minio/minio-go/pkg/set"
 )
+
+// Tests private function writeWebErrorResponse.
+func TestWriteWebErrorResponse(t *testing.T) {
+	var buffer bytes.Buffer
+	testCases := []struct {
+		webErr     error
+		apiErrCode APIErrorCode
+	}{
+		// List of various errors and their corresponding API errors.
+		{
+			webErr:     StorageFull{},
+			apiErrCode: ErrStorageFull,
+		},
+		{
+			webErr:     BucketNotFound{},
+			apiErrCode: ErrNoSuchBucket,
+		},
+		{
+			webErr:     BucketNameInvalid{},
+			apiErrCode: ErrInvalidBucketName,
+		},
+		{
+			webErr:     BadDigest{},
+			apiErrCode: ErrBadDigest,
+		},
+		{
+			webErr:     IncompleteBody{},
+			apiErrCode: ErrIncompleteBody,
+		},
+		{
+			webErr:     ObjectExistsAsDirectory{},
+			apiErrCode: ErrObjectExistsAsDirectory,
+		},
+		{
+			webErr:     ObjectNotFound{},
+			apiErrCode: ErrNoSuchKey,
+		},
+		{
+			webErr:     ObjectNameInvalid{},
+			apiErrCode: ErrNoSuchKey,
+		},
+		{
+			webErr:     InsufficientWriteQuorum{},
+			apiErrCode: ErrWriteQuorum,
+		},
+		{
+			webErr:     InsufficientReadQuorum{},
+			apiErrCode: ErrReadQuorum,
+		},
+	}
+
+	// Validate all the test cases.
+	for i, testCase := range testCases {
+		writeWebErrorResponse(newFlushWriter(&buffer), testCase.webErr)
+		desc := getAPIError(testCase.apiErrCode).Description
+		recvDesc := buffer.Bytes()
+		// Check if the written desc is same as the one expected.
+		if !bytes.Equal(recvDesc, []byte(desc)) {
+			t.Errorf("Test %d: Unexpected response, expecting %s, got %s", i+1, desc, string(buffer.Bytes()))
+		}
+		buffer.Reset()
+	}
+}
 
 // Authenticate and get JWT token - will be called before every webrpc handler invocation
 func getWebRPCToken(apiRouter http.Handler, accessKey, secretKey string) (token string, err error) {
@@ -69,7 +133,7 @@ func testLoginWebHandler(obj ObjectLayer, instanceType string, t TestErrHandler)
 	if err != nil {
 		t.Fatalf("Init Test config failed")
 	}
-	// remove the root folder after the test ends.
+	// remove the root directory after the test ends.
 	defer removeAll(rootPath)
 
 	credentials := serverConfig.GetCredential()
@@ -117,7 +181,7 @@ func testStorageInfoWebHandler(obj ObjectLayer, instanceType string, t TestErrHa
 	if err != nil {
 		t.Fatalf("Init Test config failed")
 	}
-	// remove the root folder after the test ends.
+	// remove the root directory after the test ends.
 	defer removeAll(rootPath)
 
 	credentials := serverConfig.GetCredential()
@@ -163,7 +227,7 @@ func testServerInfoWebHandler(obj ObjectLayer, instanceType string, t TestErrHan
 	if err != nil {
 		t.Fatalf("Init Test config failed")
 	}
-	// remove the root folder after the test ends.
+	// remove the root directory after the test ends.
 	defer removeAll(rootPath)
 
 	credentials := serverConfig.GetCredential()
@@ -209,7 +273,7 @@ func testMakeBucketWebHandler(obj ObjectLayer, instanceType string, t TestErrHan
 	if err != nil {
 		t.Fatalf("Init Test config failed")
 	}
-	// remove the root folder after the test ends.
+	// remove the root directory after the test ends.
 	defer removeAll(rootPath)
 
 	credentials := serverConfig.GetCredential()
@@ -269,7 +333,7 @@ func testListBucketsWebHandler(obj ObjectLayer, instanceType string, t TestErrHa
 	if err != nil {
 		t.Fatalf("Init Test config failed")
 	}
-	// remove the root folder after the test ends.
+	// remove the root directory after the test ends.
 	defer removeAll(rootPath)
 
 	credentials := serverConfig.GetCredential()
@@ -326,7 +390,7 @@ func testListObjectsWebHandler(obj ObjectLayer, instanceType string, t TestErrHa
 	if err != nil {
 		t.Fatalf("Init Test config failed")
 	}
-	// remove the root folder after the test ends.
+	// remove the root directory after the test ends.
 	defer removeAll(rootPath)
 
 	credentials := serverConfig.GetCredential()
@@ -340,7 +404,7 @@ func testListObjectsWebHandler(obj ObjectLayer, instanceType string, t TestErrHa
 
 	bucketName := getRandomBucketName()
 	objectName := "object"
-	objectSize := 1024
+	objectSize := 1 * humanize.KiByte
 
 	// Create bucket.
 	err = obj.MakeBucket(bucketName)
@@ -398,7 +462,7 @@ func testRemoveObjectWebHandler(obj ObjectLayer, instanceType string, t TestErrH
 	if err != nil {
 		t.Fatalf("Init Test config failed")
 	}
-	// remove the root folder after the test ends.
+	// remove the root directory after the test ends.
 	defer removeAll(rootPath)
 
 	credentials := serverConfig.GetCredential()
@@ -411,7 +475,7 @@ func testRemoveObjectWebHandler(obj ObjectLayer, instanceType string, t TestErrH
 
 	bucketName := getRandomBucketName()
 	objectName := "object"
-	objectSize := 1024
+	objectSize := 1 * humanize.KiByte
 
 	// Create bucket.
 	err = obj.MakeBucket(bucketName)
@@ -422,8 +486,8 @@ func testRemoveObjectWebHandler(obj ObjectLayer, instanceType string, t TestErrH
 
 	data := bytes.Repeat([]byte("a"), objectSize)
 
-	_, err = obj.PutObject(bucketName, objectName, int64(len(data)), bytes.NewReader(data), map[string]string{"md5Sum": "c9a34cfc85d982698c6ac89f76071abd"}, "")
-
+	_, err = obj.PutObject(bucketName, objectName, int64(len(data)), bytes.NewReader(data),
+		map[string]string{"md5Sum": "c9a34cfc85d982698c6ac89f76071abd"}, "")
 	if err != nil {
 		t.Fatalf("Was not able to upload an object, %v", err)
 	}
@@ -431,6 +495,21 @@ func testRemoveObjectWebHandler(obj ObjectLayer, instanceType string, t TestErrH
 	removeObjectRequest := RemoveObjectArgs{BucketName: bucketName, ObjectName: objectName}
 	removeObjectReply := &WebGenericRep{}
 	req, err := newTestWebRPCRequest("Web.RemoveObject", authorization, removeObjectRequest)
+	if err != nil {
+		t.Fatalf("Failed to create HTTP request: <ERROR> %v", err)
+	}
+	apiRouter.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Expected the response status to be 200, but instead found `%d`", rec.Code)
+	}
+	err = getTestWebRPCResponse(rec, &removeObjectReply)
+	if err != nil {
+		t.Fatalf("Failed, %v", err)
+	}
+
+	removeObjectRequest = RemoveObjectArgs{BucketName: bucketName, ObjectName: objectName}
+	removeObjectReply = &WebGenericRep{}
+	req, err = newTestWebRPCRequest("Web.RemoveObject", authorization, removeObjectRequest)
 	if err != nil {
 		t.Fatalf("Failed to create HTTP request: <ERROR> %v", err)
 	}
@@ -459,7 +538,7 @@ func testGenerateAuthWebHandler(obj ObjectLayer, instanceType string, t TestErrH
 	if err != nil {
 		t.Fatalf("Init Test config failed")
 	}
-	// remove the root folder after the test ends.
+	// remove the root directory after the test ends.
 	defer removeAll(rootPath)
 
 	credentials := serverConfig.GetCredential()
@@ -505,7 +584,7 @@ func testSetAuthWebHandler(obj ObjectLayer, instanceType string, t TestErrHandle
 	if err != nil {
 		t.Fatalf("Init Test config failed")
 	}
-	// remove the root folder after the test ends.
+	// remove the root directory after the test ends.
 	defer removeAll(rootPath)
 
 	credentials := serverConfig.GetCredential()
@@ -522,12 +601,12 @@ func testSetAuthWebHandler(obj ObjectLayer, instanceType string, t TestErrHandle
 		success  bool
 	}{
 		{"", "", false},
+		{"1", "1", false},
 		{"azerty", "foooooooooooooo", true},
 	}
 
 	// Iterating over the test cases, calling the function under test and asserting the response.
 	for i, testCase := range testCases {
-
 		setAuthRequest := SetAuthArgs{AccessKey: testCase.username, SecretKey: testCase.password}
 		setAuthReply := &SetAuthReply{}
 		req, err := newTestWebRPCRequest("Web.SetAuth", authorization, setAuthRequest)
@@ -566,7 +645,7 @@ func testGetAuthWebHandler(obj ObjectLayer, instanceType string, t TestErrHandle
 	if err != nil {
 		t.Fatalf("Init Test config failed")
 	}
-	// remove the root folder after the test ends.
+	// remove the root directory after the test ends.
 	defer removeAll(rootPath)
 
 	credentials := serverConfig.GetCredential()
@@ -611,7 +690,7 @@ func testUploadWebHandler(obj ObjectLayer, instanceType string, t TestErrHandler
 	if err != nil {
 		t.Fatalf("Init Test config failed")
 	}
-	// remove the root folder after the test ends.
+	// remove the root directory after the test ends.
 	defer removeAll(rootPath)
 
 	credentials := serverConfig.GetCredential()
@@ -675,7 +754,7 @@ func testDownloadWebHandler(obj ObjectLayer, instanceType string, t TestErrHandl
 	if err != nil {
 		t.Fatalf("Init Test config failed")
 	}
-	// remove the root folder after the test ends.
+	// remove the root directory after the test ends.
 	defer removeAll(rootPath)
 
 	credentials := serverConfig.GetCredential()
@@ -731,7 +810,7 @@ func testWebPresignedGetHandler(obj ObjectLayer, instanceType string, t TestErrH
 	if err != nil {
 		t.Fatalf("Init Test config failed")
 	}
-	// remove the root folder after the test ends.
+	// remove the root directory after the test ends.
 	defer removeAll(rootPath)
 
 	credentials := serverConfig.GetCredential()
@@ -745,7 +824,7 @@ func testWebPresignedGetHandler(obj ObjectLayer, instanceType string, t TestErrH
 
 	bucketName := getRandomBucketName()
 	objectName := "object"
-	objectSize := 1024
+	objectSize := 1 * humanize.KiByte
 
 	// Create bucket.
 	err = obj.MakeBucket(bucketName)
@@ -764,6 +843,7 @@ func testWebPresignedGetHandler(obj ObjectLayer, instanceType string, t TestErrH
 		HostName:   "",
 		BucketName: bucketName,
 		ObjectName: objectName,
+		Expiry:     1000,
 	}
 	presignGetRep := &PresignedGetRep{}
 	req, err := newTestWebRPCRequest("Web.PresignedGet", authorization, presignGetReq)
@@ -823,8 +903,8 @@ func testWebPresignedGetHandler(obj ObjectLayer, instanceType string, t TestErrH
 	if err == nil {
 		t.Fatalf("Failed, %v", err)
 	}
-	if err.Error() != "Required arguments: Host, Bucket, Object" {
-		t.Fatalf("Unexpected, expected `Required arguments: Host, Bucket, Object`, got %s", err)
+	if err.Error() != "Bucket and Object are mandatory arguments." {
+		t.Fatalf("Unexpected, expected `Bucket and Object are mandatory arguments`, got %s", err)
 	}
 }
 
@@ -843,7 +923,7 @@ func testWebGetBucketPolicyHandler(obj ObjectLayer, instanceType string, t TestE
 	if err != nil {
 		t.Fatalf("Init Test config failed")
 	}
-	// remove the root folder after the test ends.
+	// remove the root directory after the test ends.
 	defer removeAll(rootPath)
 
 	credentials := serverConfig.GetCredential()
@@ -926,7 +1006,7 @@ func testWebListAllBucketPoliciesHandler(obj ObjectLayer, instanceType string, t
 	if err != nil {
 		t.Fatalf("Init Test config failed")
 	}
-	// remove the root folder after the test ends.
+	// remove the root directory after the test ends.
 	defer removeAll(rootPath)
 
 	credentials := serverConfig.GetCredential()
@@ -1032,7 +1112,7 @@ func testWebSetBucketPolicyHandler(obj ObjectLayer, instanceType string, t TestE
 	if err != nil {
 		t.Fatalf("Init Test config failed")
 	}
-	// remove the root folder after the test ends.
+	// remove the root directory after the test ends.
 	defer removeAll(rootPath)
 
 	credentials := serverConfig.GetCredential()
@@ -1056,8 +1136,6 @@ func testWebSetBucketPolicyHandler(obj ObjectLayer, instanceType string, t TestE
 		policy     string
 		pass       bool
 	}{
-		// Inexistent bucket
-		{"fooo", "", "readonly", false},
 		// Invalid bucket name
 		{"", "", "readonly", false},
 		// Invalid policy
@@ -1112,14 +1190,19 @@ func TestWebCheckAuthorization(t *testing.T) {
 	if err != nil {
 		t.Fatal("Init Test config failed", err)
 	}
-	// remove the root folder after the test ends.
+	// remove the root directory after the test ends.
 	defer removeAll(rootPath)
 
 	rec := httptest.NewRecorder()
 
 	// Check if web rpc calls return unauthorized request with an incorrect token
-	webRPCs := []string{"ServerInfo", "StorageInfo", "MakeBucket", "ListBuckets", "ListObjects", "RemoveObject", "GenerateAuth",
-		"SetAuth", "GetAuth", "GetBucketPolicy", "SetBucketPolicy"}
+	webRPCs := []string{
+		"ServerInfo", "StorageInfo", "MakeBucket",
+		"ListBuckets", "ListObjects", "RemoveObject",
+		"GenerateAuth", "SetAuth", "GetAuth",
+		"GetBucketPolicy", "SetBucketPolicy", "ListAllBucketPolicies",
+		"PresignedGet",
+	}
 	for _, rpcCall := range webRPCs {
 		args := &GenericArgs{}
 		reply := &WebGenericRep{}
@@ -1135,26 +1218,28 @@ func TestWebCheckAuthorization(t *testing.T) {
 		if err == nil {
 			t.Fatalf("Test %s: Should fail", rpcCall)
 		} else {
-			if !strings.Contains(err.Error(), "Unauthorized request") {
+			if !strings.Contains(err.Error(), errAuthentication.Error()) {
 				t.Fatalf("Test %s: should fail with Unauthorized request. Found error: %v", rpcCall, err)
 			}
 		}
 	}
 
+	rec = httptest.NewRecorder()
 	// Test authorization of Web.Download
 	req, err := http.NewRequest("GET", "/minio/download/bucket/object?token=wrongauth", nil)
 	if err != nil {
 		t.Fatalf("Cannot create upload request, %v", err)
 	}
 	apiRouter.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("Expected the response status to be 200, but instead found `%d`", rec.Code)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("Expected the response status to be 403, but instead found `%d`", rec.Code)
 	}
 	resp := string(rec.Body.Bytes())
-	if !strings.Contains(resp, "Invalid token") {
-		t.Fatalf("Unexpected error message, expected: `Invalid token`, found: `%s`", resp)
+	if !strings.EqualFold(resp, errAuthentication.Error()) {
+		t.Fatalf("Unexpected error message, expected: %s, found: `%s`", errAuthentication, resp)
 	}
 
+	rec = httptest.NewRecorder()
 	// Test authorization of Web.Upload
 	content := []byte("temporary file's content")
 	req, err = http.NewRequest("PUT", "/minio/upload/bucket/object", nil)
@@ -1167,12 +1252,12 @@ func TestWebCheckAuthorization(t *testing.T) {
 		t.Fatalf("Cannot create upload request, %v", err)
 	}
 	apiRouter.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("Expected the response status to be 200, but instead found `%d`", rec.Code)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("Expected the response status to be 403, but instead found `%d`", rec.Code)
 	}
 	resp = string(rec.Body.Bytes())
-	if !strings.Contains(resp, "Invalid token") {
-		t.Fatalf("Unexpected error message, expected: `Invalid token`, found: `%s`", resp)
+	if !strings.EqualFold(resp, errAuthentication.Error()) {
+		t.Fatalf("Unexpected error message, expected: `%s`, found: `%s`", errAuthentication, resp)
 	}
 }
 
@@ -1187,7 +1272,7 @@ func TestWebObjectLayerNotReady(t *testing.T) {
 	if err != nil {
 		t.Fatal("Init Test config failed", err)
 	}
-	// remove the root folder after the test ends.
+	// remove the root directory after the test ends.
 	defer removeAll(rootPath)
 
 	rec := httptest.NewRecorder()
@@ -1201,7 +1286,7 @@ func TestWebObjectLayerNotReady(t *testing.T) {
 	// Check if web rpc calls return Server not initialized. ServerInfo, GenerateAuth,
 	// SetAuth and GetAuth are not concerned
 	webRPCs := []string{"StorageInfo", "MakeBucket", "ListBuckets", "ListObjects", "RemoveObject",
-		"GetBucketPolicy", "SetBucketPolicy"}
+		"GetBucketPolicy", "SetBucketPolicy", "ListAllBucketPolicies"}
 	for _, rpcCall := range webRPCs {
 		args := &GenericArgs{}
 		reply := &WebGenericRep{}
@@ -1217,26 +1302,28 @@ func TestWebObjectLayerNotReady(t *testing.T) {
 		if err == nil {
 			t.Fatalf("Test %s: Should fail", rpcCall)
 		} else {
-			if !strings.Contains(err.Error(), "Server not initialized") {
-				t.Fatalf("Test %s: should fail with Unauthorized request. Found error: %v", rpcCall, err)
+			if !strings.EqualFold(err.Error(), errServerNotInitialized.Error()) {
+				t.Fatalf("Test %s: should fail with %s Found error: %v", rpcCall, errServerNotInitialized, err)
 			}
 		}
 	}
 
+	rec = httptest.NewRecorder()
 	// Test authorization of Web.Download
 	req, err := http.NewRequest("GET", "/minio/download/bucket/object?token="+authorization, nil)
 	if err != nil {
 		t.Fatalf("Cannot create upload request, %v", err)
 	}
 	apiRouter.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("Expected the response status to be 200, but instead found `%d`", rec.Code)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("Expected the response status to be 503, but instead found `%d`", rec.Code)
 	}
 	resp := string(rec.Body.Bytes())
-	if !strings.Contains(resp, "We encountered an internal error, please try again.") {
-		t.Fatalf("Unexpected error message, expected: `Invalid token`, found: `%s`", resp)
+	if !strings.EqualFold(resp, errServerNotInitialized.Error()) {
+		t.Fatalf("Unexpected error message, expected: `%s`, found: `%s`", errServerNotInitialized, resp)
 	}
 
+	rec = httptest.NewRecorder()
 	// Test authorization of Web.Upload
 	content := []byte("temporary file's content")
 	req, err = http.NewRequest("PUT", "/minio/upload/bucket/object", nil)
@@ -1249,17 +1336,23 @@ func TestWebObjectLayerNotReady(t *testing.T) {
 		t.Fatalf("Cannot create upload request, %v", err)
 	}
 	apiRouter.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("Expected the response status to be 200, but instead found `%d`", rec.Code)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("Expected the response status to be 503, but instead found `%d`", rec.Code)
 	}
 	resp = string(rec.Body.Bytes())
-	if !strings.Contains(resp, "We encountered an internal error, please try again.") {
-		t.Fatalf("Unexpected error message, expected: `Invalid token`, found: `%s`", resp)
+	if !strings.EqualFold(resp, errServerNotInitialized.Error()) {
+		t.Fatalf("Unexpected error message, expected: `%s`, found: `%s`", errServerNotInitialized, resp)
 	}
 }
 
 // TestWebObjectLayerFaultyDisks - Test Web RPC responses with faulty disks
 func TestWebObjectLayerFaultyDisks(t *testing.T) {
+	root, err := newTestConfig("us-east-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer removeAll(root)
+
 	// Prepare XL backend
 	obj, fsDirs, err := prepareXL()
 	if err != nil {
@@ -1269,9 +1362,9 @@ func TestWebObjectLayerFaultyDisks(t *testing.T) {
 	defer removeRoots(fsDirs)
 
 	// Set faulty disks to XL backend
-	xl := obj.(xlObjects)
+	xl := obj.(*xlObjects)
 	for i, d := range xl.storageDisks {
-		xl.storageDisks[i] = newNaughtyDisk(d.(*posix), nil, errFaultyDisk)
+		xl.storageDisks[i] = newNaughtyDisk(d.(*retryStorage), nil, errFaultyDisk)
 	}
 
 	// Initialize web rpc endpoint.
@@ -1283,7 +1376,7 @@ func TestWebObjectLayerFaultyDisks(t *testing.T) {
 	if err != nil {
 		t.Fatal("Init Test config failed", err)
 	}
-	// remove the root folder after the test ends.
+	// remove the root directory after the test ends.
 	defer removeAll(rootPath)
 
 	rec := httptest.NewRecorder()

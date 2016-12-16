@@ -91,31 +91,16 @@ func (api objectAPIHandlers) GetObjectHandler(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	switch getRequestAuthType(r) {
-	default:
-		// For all unknown auth types return error.
-		writeErrorResponse(w, r, ErrAccessDenied, r.URL.Path)
+	if s3Error := checkRequestAuthType(r, bucket, "s3:GetObject", serverConfig.GetRegion()); s3Error != ErrNone {
+		writeErrorResponse(w, r, s3Error, r.URL.Path)
 		return
-	case authTypeAnonymous:
-		// http://docs.aws.amazon.com/AmazonS3/latest/dev/using-with-s3-actions.html
-		if s3Error := enforceBucketPolicy(bucket, "s3:GetObject", r.URL); s3Error != ErrNone {
-			writeErrorResponse(w, r, s3Error, r.URL.Path)
-			return
-		}
-	case authTypePresignedV2, authTypeSignedV2:
-		// Signature V2 validation.
-		if s3Error := isReqAuthenticatedV2(r); s3Error != ErrNone {
-			errorIf(errSignatureMismatch, dumpRequest(r))
-			writeErrorResponse(w, r, s3Error, r.URL.Path)
-			return
-		}
-	case authTypePresigned, authTypeSigned:
-		if s3Error := isReqAuthenticated(r, serverConfig.GetRegion()); s3Error != ErrNone {
-			errorIf(errSignatureMismatch, dumpRequest(r))
-			writeErrorResponse(w, r, s3Error, r.URL.Path)
-			return
-		}
 	}
+
+	// Lock the object before reading.
+	objectLock := globalNSMutex.NewNSLock(bucket, object)
+	objectLock.RLock()
+	defer objectLock.RUnlock()
+
 	objInfo, err := objectAPI.GetObjectInfo(bucket, object)
 	if err != nil {
 		errorIf(err, "Unable to fetch object info.")
@@ -210,31 +195,15 @@ func (api objectAPIHandlers) HeadObjectHandler(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	switch getRequestAuthType(r) {
-	default:
-		// For all unknown auth types return error.
-		writeErrorResponse(w, r, ErrAccessDenied, r.URL.Path)
+	if s3Error := checkRequestAuthType(r, bucket, "s3:GetObject", serverConfig.GetRegion()); s3Error != ErrNone {
+		writeErrorResponse(w, r, s3Error, r.URL.Path)
 		return
-	case authTypeAnonymous:
-		// http://docs.aws.amazon.com/AmazonS3/latest/dev/using-with-s3-actions.html
-		if s3Error := enforceBucketPolicy(bucket, "s3:GetObject", r.URL); s3Error != ErrNone {
-			writeErrorResponse(w, r, s3Error, r.URL.Path)
-			return
-		}
-	case authTypePresignedV2, authTypeSignedV2:
-		// Signature V2 validation.
-		if s3Error := isReqAuthenticatedV2(r); s3Error != ErrNone {
-			errorIf(errSignatureMismatch, dumpRequest(r))
-			writeErrorResponse(w, r, s3Error, r.URL.Path)
-			return
-		}
-	case authTypePresigned, authTypeSigned:
-		if s3Error := isReqAuthenticated(r, serverConfig.GetRegion()); s3Error != ErrNone {
-			errorIf(errSignatureMismatch, dumpRequest(r))
-			writeErrorResponse(w, r, s3Error, r.URL.Path)
-			return
-		}
 	}
+
+	// Lock the object before reading.
+	objectLock := globalNSMutex.NewNSLock(bucket, object)
+	objectLock.RLock()
+	defer objectLock.RUnlock()
 
 	objInfo, err := objectAPI.GetObjectInfo(bucket, object)
 	if err != nil {
@@ -274,30 +243,9 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	switch getRequestAuthType(r) {
-	default:
-		// For all unknown auth types return error.
-		writeErrorResponse(w, r, ErrAccessDenied, r.URL.Path)
+	if s3Error := checkRequestAuthType(r, bucket, "s3:PutObject", serverConfig.GetRegion()); s3Error != ErrNone {
+		writeErrorResponse(w, r, s3Error, r.URL.Path)
 		return
-	case authTypeAnonymous:
-		// http://docs.aws.amazon.com/AmazonS3/latest/dev/using-with-s3-actions.html
-		if s3Error := enforceBucketPolicy(bucket, "s3:PutObject", r.URL); s3Error != ErrNone {
-			writeErrorResponse(w, r, s3Error, r.URL.Path)
-			return
-		}
-	case authTypePresignedV2, authTypeSignedV2:
-		// Signature V2 validation.
-		if s3Error := isReqAuthenticatedV2(r); s3Error != ErrNone {
-			errorIf(errSignatureMismatch, dumpRequest(r))
-			writeErrorResponse(w, r, s3Error, r.URL.Path)
-			return
-		}
-	case authTypePresigned, authTypeSigned:
-		if s3Error := isReqAuthenticated(r, serverConfig.GetRegion()); s3Error != ErrNone {
-			errorIf(errSignatureMismatch, dumpRequest(r))
-			writeErrorResponse(w, r, s3Error, r.URL.Path)
-			return
-		}
 	}
 
 	// TODO: Reject requests where body/payload is present, for now we don't even read it.
@@ -330,6 +278,11 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 		writeErrorResponse(w, r, ErrInvalidCopyDest, r.URL.Path)
 		return
 	}
+
+	// Lock the object before reading.
+	objectRLock := globalNSMutex.NewNSLock(sourceBucket, sourceObject)
+	objectRLock.RLock()
+	defer objectRLock.RUnlock()
 
 	objInfo, err := objectAPI.GetObjectInfo(sourceBucket, sourceObject)
 	if err != nil {
@@ -373,6 +326,11 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 	delete(metadata, "md5Sum")
 
 	sha256sum := ""
+
+	objectWLock := globalNSMutex.NewNSLock(bucket, object)
+	objectWLock.Lock()
+	defer objectWLock.Unlock()
+
 	// Create the object.
 	objInfo, err = objectAPI.PutObject(bucket, object, size, pipeReader, metadata, sha256sum)
 	if err != nil {
@@ -462,6 +420,11 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 
 	sha256sum := ""
 
+	// Lock the object.
+	objectLock := globalNSMutex.NewNSLock(bucket, object)
+	objectLock.Lock()
+	defer objectLock.Unlock()
+
 	var objInfo ObjectInfo
 	switch rAuthType {
 	default:
@@ -539,30 +502,9 @@ func (api objectAPIHandlers) NewMultipartUploadHandler(w http.ResponseWriter, r 
 		return
 	}
 
-	switch getRequestAuthType(r) {
-	default:
-		// For all unknown auth types return error.
-		writeErrorResponse(w, r, ErrAccessDenied, r.URL.Path)
+	if s3Error := checkRequestAuthType(r, bucket, "s3:PutObject", serverConfig.GetRegion()); s3Error != ErrNone {
+		writeErrorResponse(w, r, s3Error, r.URL.Path)
 		return
-	case authTypeAnonymous:
-		// http://docs.aws.amazon.com/AmazonS3/latest/dev/mpuAndPermissions.html
-		if s3Error := enforceBucketPolicy(bucket, "s3:PutObject", r.URL); s3Error != ErrNone {
-			writeErrorResponse(w, r, s3Error, r.URL.Path)
-			return
-		}
-	case authTypePresignedV2, authTypeSignedV2:
-		// Signature V2 validation.
-		if s3Error := isReqAuthenticatedV2(r); s3Error != ErrNone {
-			errorIf(errSignatureMismatch, dumpRequest(r))
-			writeErrorResponse(w, r, s3Error, r.URL.Path)
-			return
-		}
-	case authTypePresigned, authTypeSigned:
-		if s3Error := isReqAuthenticated(r, serverConfig.GetRegion()); s3Error != ErrNone {
-			errorIf(errSignatureMismatch, dumpRequest(r))
-			writeErrorResponse(w, r, s3Error, r.URL.Path)
-			return
-		}
 	}
 
 	// Extract metadata that needs to be saved.
@@ -711,30 +653,9 @@ func (api objectAPIHandlers) AbortMultipartUploadHandler(w http.ResponseWriter, 
 		return
 	}
 
-	switch getRequestAuthType(r) {
-	default:
-		// For all unknown auth types return error.
-		writeErrorResponse(w, r, ErrAccessDenied, r.URL.Path)
+	if s3Error := checkRequestAuthType(r, bucket, "s3:AbortMultipartUpload", serverConfig.GetRegion()); s3Error != ErrNone {
+		writeErrorResponse(w, r, s3Error, r.URL.Path)
 		return
-	case authTypeAnonymous:
-		// http://docs.aws.amazon.com/AmazonS3/latest/dev/mpuAndPermissions.html
-		if s3Error := enforceBucketPolicy(bucket, "s3:AbortMultipartUpload", r.URL); s3Error != ErrNone {
-			writeErrorResponse(w, r, s3Error, r.URL.Path)
-			return
-		}
-	case authTypePresignedV2, authTypeSignedV2:
-		// Signature V2 validation.
-		if s3Error := isReqAuthenticatedV2(r); s3Error != ErrNone {
-			errorIf(errSignatureMismatch, dumpRequest(r))
-			writeErrorResponse(w, r, s3Error, r.URL.Path)
-			return
-		}
-	case authTypePresigned, authTypeSigned:
-		if s3Error := isReqAuthenticated(r, serverConfig.GetRegion()); s3Error != ErrNone {
-			errorIf(errSignatureMismatch, dumpRequest(r))
-			writeErrorResponse(w, r, s3Error, r.URL.Path)
-			return
-		}
 	}
 
 	uploadID, _, _, _ := getObjectResources(r.URL.Query())
@@ -758,30 +679,9 @@ func (api objectAPIHandlers) ListObjectPartsHandler(w http.ResponseWriter, r *ht
 		return
 	}
 
-	switch getRequestAuthType(r) {
-	default:
-		// For all unknown auth types return error.
-		writeErrorResponse(w, r, ErrAccessDenied, r.URL.Path)
+	if s3Error := checkRequestAuthType(r, bucket, "s3:ListMultipartUploadParts", serverConfig.GetRegion()); s3Error != ErrNone {
+		writeErrorResponse(w, r, s3Error, r.URL.Path)
 		return
-	case authTypeAnonymous:
-		// http://docs.aws.amazon.com/AmazonS3/latest/dev/mpuAndPermissions.html
-		if s3Error := enforceBucketPolicy(bucket, "s3:ListMultipartUploadParts", r.URL); s3Error != ErrNone {
-			writeErrorResponse(w, r, s3Error, r.URL.Path)
-			return
-		}
-	case authTypePresignedV2, authTypeSignedV2:
-		// Signature V2 validation.
-		if s3Error := isReqAuthenticatedV2(r); s3Error != ErrNone {
-			errorIf(errSignatureMismatch, dumpRequest(r))
-			writeErrorResponse(w, r, s3Error, r.URL.Path)
-			return
-		}
-	case authTypePresigned, authTypeSigned:
-		if s3Error := isReqAuthenticated(r, serverConfig.GetRegion()); s3Error != ErrNone {
-			errorIf(errSignatureMismatch, dumpRequest(r))
-			writeErrorResponse(w, r, s3Error, r.URL.Path)
-			return
-		}
 	}
 
 	uploadID, partNumberMarker, maxParts, _ := getObjectResources(r.URL.Query())
@@ -819,35 +719,15 @@ func (api objectAPIHandlers) CompleteMultipartUploadHandler(w http.ResponseWrite
 		return
 	}
 
+	if s3Error := checkRequestAuthType(r, bucket, "s3:PutObject", serverConfig.GetRegion()); s3Error != ErrNone {
+		writeErrorResponse(w, r, s3Error, r.URL.Path)
+		return
+	}
+
 	// Get upload id.
 	uploadID, _, _, _ := getObjectResources(r.URL.Query())
 
 	var md5Sum string
-	switch getRequestAuthType(r) {
-	default:
-		// For all unknown auth types return error.
-		writeErrorResponse(w, r, ErrAccessDenied, r.URL.Path)
-		return
-	case authTypeAnonymous:
-		// http://docs.aws.amazon.com/AmazonS3/latest/dev/mpuAndPermissions.html
-		if s3Error := enforceBucketPolicy(bucket, "s3:PutObject", r.URL); s3Error != ErrNone {
-			writeErrorResponse(w, r, s3Error, r.URL.Path)
-			return
-		}
-	case authTypePresignedV2, authTypeSignedV2:
-		// Signature V2 validation.
-		if s3Error := isReqAuthenticatedV2(r); s3Error != ErrNone {
-			errorIf(errSignatureMismatch, dumpRequest(r))
-			writeErrorResponse(w, r, s3Error, r.URL.Path)
-			return
-		}
-	case authTypePresigned, authTypeSigned:
-		if s3Error := isReqAuthenticated(r, serverConfig.GetRegion()); s3Error != ErrNone {
-			errorIf(errSignatureMismatch, dumpRequest(r))
-			writeErrorResponse(w, r, s3Error, r.URL.Path)
-			return
-		}
-	}
 	completeMultipartBytes, err := ioutil.ReadAll(r.Body)
 	if err != nil {
 		errorIf(err, "Unable to complete multipart upload.")
@@ -876,8 +756,12 @@ func (api objectAPIHandlers) CompleteMultipartUploadHandler(w http.ResponseWrite
 		completeParts = append(completeParts, part)
 	}
 
-	md5Sum, err = objectAPI.CompleteMultipartUpload(bucket, object, uploadID, completeParts)
+	// Hold write lock on the object.
+	destLock := globalNSMutex.NewNSLock(bucket, object)
+	destLock.Lock()
+	defer destLock.Unlock()
 
+	md5Sum, err = objectAPI.CompleteMultipartUpload(bucket, object, uploadID, completeParts)
 	if err != nil {
 		err = errorCause(err)
 		errorIf(err, "Unable to complete multipart upload.")
@@ -902,6 +786,9 @@ func (api objectAPIHandlers) CompleteMultipartUploadHandler(w http.ResponseWrite
 		writeErrorResponseNoHeader(w, r, ErrInternalError, r.URL.Path)
 		return
 	}
+
+	// Set etag.
+	w.Header().Set("ETag", "\""+md5Sum+"\"")
 
 	// Write success response.
 	w.Write(encodedSuccessResponse)
@@ -939,31 +826,15 @@ func (api objectAPIHandlers) DeleteObjectHandler(w http.ResponseWriter, r *http.
 		return
 	}
 
-	switch getRequestAuthType(r) {
-	default:
-		// For all unknown auth types return error.
-		writeErrorResponse(w, r, ErrAccessDenied, r.URL.Path)
+	if s3Error := checkRequestAuthType(r, bucket, "s3:DeleteObject", serverConfig.GetRegion()); s3Error != ErrNone {
+		writeErrorResponse(w, r, s3Error, r.URL.Path)
 		return
-	case authTypeAnonymous:
-		// http://docs.aws.amazon.com/AmazonS3/latest/dev/using-with-s3-actions.html
-		if s3Error := enforceBucketPolicy(bucket, "s3:DeleteObject", r.URL); s3Error != ErrNone {
-			writeErrorResponse(w, r, s3Error, r.URL.Path)
-			return
-		}
-	case authTypePresignedV2, authTypeSignedV2:
-		// Signature V2 validation.
-		if s3Error := isReqAuthenticatedV2(r); s3Error != ErrNone {
-			errorIf(errSignatureMismatch, dumpRequest(r))
-			writeErrorResponse(w, r, s3Error, r.URL.Path)
-			return
-		}
-	case authTypeSigned, authTypePresigned:
-		if s3Error := isReqAuthenticated(r, serverConfig.GetRegion()); s3Error != ErrNone {
-			errorIf(errSignatureMismatch, dumpRequest(r))
-			writeErrorResponse(w, r, s3Error, r.URL.Path)
-			return
-		}
 	}
+
+	objectLock := globalNSMutex.NewNSLock(bucket, object)
+	objectLock.Lock()
+	defer objectLock.Unlock()
+
 	/// http://docs.aws.amazon.com/AmazonS3/latest/API/RESTObjectDELETE.html
 	/// Ignore delete object errors, since we are suppposed to reply
 	/// only 204.

@@ -44,9 +44,7 @@ func TestGetListenIPs(t *testing.T) {
 		if test.port != "" {
 			addr = test.addr + ":" + test.port
 		}
-		hosts, port, err := getListenIPs(&http.Server{
-			Addr: addr,
-		})
+		hosts, port, err := getListenIPs(addr)
 		if !test.shouldPass && err == nil {
 			t.Fatalf("Test should fail but succeeded %s", err)
 		}
@@ -177,6 +175,30 @@ func TestCheckSufficientDisks(t *testing.T) {
 	}
 }
 
+func TestParseStorageEndpoints(t *testing.T) {
+	testCases := []struct {
+		globalMinioHost string
+		host            string
+		expectedErr     error
+	}{
+		{"", "http://localhost/export", nil},
+		{"testhost", "http://localhost/export", errInvalidArgument},
+		{"", "http://localhost:9000/export", errInvalidArgument},
+		{"testhost", "http://localhost:9000/export", nil},
+	}
+	for i, test := range testCases {
+		globalMinioHost = test.globalMinioHost
+		_, err := parseStorageEndpoints([]string{test.host})
+		if err != test.expectedErr {
+			t.Errorf("Test %d : got %v, expected %v", i+1, err, test.expectedErr)
+		}
+	}
+	// Should be reset back to "" so that we don't affect other tests.
+	globalMinioHost = ""
+}
+
+// Test check endpoints syntax function for syntax verification
+// across various scenarios of inputs.
 func TestCheckEndpointsSyntax(t *testing.T) {
 	var testCases []string
 	if runtime.GOOS == "windows" {
@@ -201,19 +223,36 @@ func TestCheckEndpointsSyntax(t *testing.T) {
 	for _, disk := range testCases {
 		eps, err := parseStorageEndpoints([]string{disk})
 		if err != nil {
-			t.Error(disk, err)
-			continue
+			t.Fatalf("Unable to parse %s, error %s", disk, err)
 		}
-		// This will fatalIf() if endpoint is invalid.
-		checkEndpointsSyntax(eps, []string{disk})
+		if err = checkEndpointsSyntax(eps, []string{disk}); err != nil {
+			t.Errorf("Invalid endpoints %s", err)
+		}
+	}
+	eps, err := parseStorageEndpoints([]string{"/"})
+	if err != nil {
+		t.Fatalf("Unable to parse /, error %s", err)
+	}
+	if err = checkEndpointsSyntax(eps, []string{"/"}); err == nil {
+		t.Error("Should fail, passed instead")
+	}
+	eps, err = parseStorageEndpoints([]string{"http://localhost/"})
+	if err != nil {
+		t.Fatalf("Unable to parse http://localhost/, error %s", err)
+	}
+	if err = checkEndpointsSyntax(eps, []string{"http://localhost/"}); err == nil {
+		t.Error("Should fail, passed instead")
 	}
 }
 
+// Tests check server syntax.
 func TestCheckServerSyntax(t *testing.T) {
 	app := cli.NewApp()
 	app.Commands = []cli.Command{serverCmd}
 	serverFlagSet := flag.NewFlagSet("server", 0)
-	cli.NewContext(app, serverFlagSet, nil)
+	serverFlagSet.String("address", ":9000", "")
+	ctx := cli.NewContext(app, serverFlagSet, serverFlagSet)
+
 	disksGen := func(n int) []string {
 		disks, err := getRandomDisks(n)
 		if err != nil {
@@ -227,21 +266,14 @@ func TestCheckServerSyntax(t *testing.T) {
 		disksGen(8),
 		disksGen(16),
 	}
+
 	for i, disks := range testCases {
 		err := serverFlagSet.Parse(disks)
 		if err != nil {
 			t.Errorf("Test %d failed to parse arguments %s", i+1, disks)
 		}
 		defer removeRoots(disks)
-		endpoints, err := parseStorageEndpoints(disks)
-		if err != nil {
-			t.Fatalf("Test %d : Unexpected error %s", i+1, err)
-		}
-		checkEndpointsSyntax(endpoints, disks)
-		_, err = initStorageDisks(endpoints, nil)
-		if err != nil {
-			t.Errorf("Test %d : disk init failed : %s", i+1, err)
-		}
+		checkServerSyntax(ctx)
 	}
 }
 
@@ -255,9 +287,8 @@ func TestIsDistributedSetup(t *testing.T) {
 			disks  []string
 			result bool
 		}{
-			{[]string{`http://4.4.4.4:80/c:\mnt\disk1`, `http://4.4.4.4:80/c:\mnt\disk2`}, true},
-			{[]string{`http://4.4.4.4:9000/c:\mnt\disk1`, `http://127.0.0.1:9000/c:\mnt\disk2`}, true},
-			{[]string{`http://127.0.0.1:9000/c:\mnt\disk1`, `http://127.0.0.1:9001/c:\mnt\disk2`}, true},
+			{[]string{`http://4.4.4.4/c:\mnt\disk1`, `http://4.4.4.4/c:\mnt\disk2`}, true},
+			{[]string{`http://4.4.4.4/c:\mnt\disk1`, `http://127.0.0.1/c:\mnt\disk2`}, true},
 			{[]string{`c:\mnt\disk1`, `c:\mnt\disk2`}, false},
 		}
 	} else {
@@ -265,23 +296,44 @@ func TestIsDistributedSetup(t *testing.T) {
 			disks  []string
 			result bool
 		}{
-			{[]string{"http://4.4.4.4:9000/mnt/disk1", "http://4.4.4.4:9000/mnt/disk2"}, true},
-			{[]string{"http://4.4.4.4:9000/mnt/disk1", "http://127.0.0.1:9000/mnt/disk2"}, true},
-			{[]string{"http://127.0.0.1:9000/mnt/disk1", "http://127.0.0.1:9000/mnt/disk2"}, true},
+			{[]string{"http://4.4.4.4/mnt/disk1", "http://4.4.4.4/mnt/disk2"}, true},
+			{[]string{"http://4.4.4.4/mnt/disk1", "http://127.0.0.1/mnt/disk2"}, true},
 			{[]string{"/mnt/disk1", "/mnt/disk2"}, false},
 		}
-
 	}
 	for i, test := range testCases {
 		endpoints, err := parseStorageEndpoints(test.disks)
 		if err != nil {
-			t.Fatalf("Unexpected error %s", err)
+			t.Fatalf("Test %d: Unexpected error: %s", i+1, err)
 		}
 		res := isDistributedSetup(endpoints)
 		if res != test.result {
 			t.Errorf("Test %d: expected result %t but received %t", i+1, test.result, res)
 		}
 	}
+
+	// Test cases when globalMinioHost is set
+	globalMinioHost = "testhost"
+	testCases = []struct {
+		disks  []string
+		result bool
+	}{
+		{[]string{"http://127.0.0.1:9001/mnt/disk1", "http://127.0.0.1:9002/mnt/disk2", "http://127.0.0.1:9003/mnt/disk3", "http://127.0.0.1:9004/mnt/disk4"}, true},
+		{[]string{"/mnt/disk1", "/mnt/disk2"}, false},
+	}
+
+	for i, test := range testCases {
+		endpoints, err := parseStorageEndpoints(test.disks)
+		if err != nil {
+			t.Fatalf("Test %d: Unexpected error: %s", i+1, err)
+		}
+		res := isDistributedSetup(endpoints)
+		if res != test.result {
+			t.Errorf("Test %d: expected result %t but received %t", i+1, test.result, res)
+		}
+	}
+	// Reset so that we don't affect other tests.
+	globalMinioHost = ""
 }
 
 func TestInitServerConfig(t *testing.T) {
@@ -296,9 +348,6 @@ func TestInitServerConfig(t *testing.T) {
 		envVar string
 		val    string
 	}{
-		{"MINIO_MAXCONN", "10"},
-		{"MINIO_CACHE_SIZE", "42MB"},
-		{"MINIO_CACHE_EXPIRY", "2h45m"},
 		{"MINIO_ACCESS_KEY", "abcd1"},
 		{"MINIO_SECRET_KEY", "abcd12345"},
 	}
@@ -308,5 +357,34 @@ func TestInitServerConfig(t *testing.T) {
 			t.Fatalf("Test %d failed with %v", i+1, tErr)
 		}
 		initServerConfig(ctx)
+	}
+}
+
+// Tests isAnyEndpointLocal function with inputs such that it returns true and false respectively.
+func TestIsAnyEndpointLocal(t *testing.T) {
+	testCases := []struct {
+		disks  []string
+		result bool
+	}{
+		{
+			disks: []string{"http://4.4.4.4/mnt/disk1",
+				"http://4.4.4.4/mnt/disk1"},
+			result: false,
+		},
+		{
+			disks: []string{"http://localhost/mnt/disk1",
+				"http://localhost/mnt/disk1"},
+			result: true,
+		},
+	}
+	for i, test := range testCases {
+		endpoints, err := parseStorageEndpoints(test.disks)
+		if err != nil {
+			t.Fatalf("Test %d - Failed to parse storage endpoints %v", i+1, err)
+		}
+		actual := isAnyEndpointLocal(endpoints)
+		if actual != test.result {
+			t.Errorf("Test %d - Expected %v but received %v", i+1, test.result, actual)
+		}
 	}
 }

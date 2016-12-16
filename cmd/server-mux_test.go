@@ -31,10 +31,138 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestListenerAcceptAfterClose(t *testing.T) {
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			for i := 0; i < 10; i++ {
+				runTest(t)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func runTest(t *testing.T) {
+	const connectionsBeforeClose = 1
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ln = newListenerMux(ln, &tls.Config{})
+
+	addr := ln.Addr().String()
+	waitForListener := make(chan error)
+	go func() {
+		defer close(waitForListener)
+
+		var connCount int
+		for {
+			conn, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+
+			connCount++
+			if connCount > connectionsBeforeClose {
+				waitForListener <- errUnexpected
+				return
+			}
+			conn.Close()
+		}
+	}()
+
+	for i := 0; i < connectionsBeforeClose; i++ {
+		err = dial(addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ln.Close()
+	dial(addr)
+
+	err = <-waitForListener
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func dial(addr string) error {
+	conn, err := net.Dial("tcp", addr)
+	if err == nil {
+		conn.Close()
+	}
+	return err
+}
+
+// Tests initializing listeners.
+func TestInitListeners(t *testing.T) {
+	testCases := []struct {
+		serverAddr string
+		shouldPass bool
+	}{
+		// Test 1 with ip and port.
+		{
+			serverAddr: "127.0.0.1:" + getFreePort(),
+			shouldPass: true,
+		},
+		// Test 2 only port.
+		{
+			serverAddr: ":" + getFreePort(),
+			shouldPass: true,
+		},
+		// Test 3 with no port error.
+		{
+			serverAddr: "127.0.0.1",
+			shouldPass: false,
+		},
+		// Test 4 with 'foobar' host not resolvable.
+		{
+			serverAddr: "foobar:9000",
+			shouldPass: false,
+		},
+	}
+	for i, testCase := range testCases {
+		listeners, err := initListeners(testCase.serverAddr, &tls.Config{})
+		if testCase.shouldPass {
+			if err != nil {
+				t.Fatalf("Test %d: Unable to initialize listeners %s", i+1, err)
+			}
+			for _, listener := range listeners {
+				if err = listener.Close(); err != nil {
+					t.Fatalf("Test %d: Unable to close listeners %s", i+1, err)
+				}
+			}
+		}
+		if err == nil && !testCase.shouldPass {
+			t.Fatalf("Test %d: Should fail but is successful", i+1)
+		}
+	}
+	// Windows doesn't have 'localhost' hostname.
+	if runtime.GOOS != "windows" {
+		listeners, err := initListeners("localhost:"+getFreePort(), &tls.Config{})
+		if err != nil {
+			t.Fatalf("Test 3: Unable to initialize listeners %s", err)
+		}
+		for _, listener := range listeners {
+			if err = listener.Close(); err != nil {
+				t.Fatalf("Test 3: Unable to close listeners %s", err)
+			}
+		}
+	}
+}
 
 func TestClose(t *testing.T) {
 	// Create ServerMux
@@ -42,6 +170,11 @@ func TestClose(t *testing.T) {
 
 	if err := m.Close(); err != nil {
 		t.Error("Server errored while trying to Close", err)
+	}
+
+	// Closing again should return an error.
+	if err := m.Close(); err.Error() != "Server has been closed" {
+		t.Error("Unexepcted error expected \"Server has been closed\", got", err)
 	}
 }
 
@@ -55,15 +188,16 @@ func TestServerMux(t *testing.T) {
 	}))
 
 	// Set the test server config to the mux
-	ts.Config = &m.Server
+	ts.Config = m.Server
 	ts.Start()
 
 	// Create a ListenerMux
 	lm := &ListenerMux{
 		Listener: ts.Listener,
 		config:   &tls.Config{},
+		cond:     sync.NewCond(&sync.Mutex{}),
 	}
-	m.listener = lm
+	m.listeners = []*ListenerMux{lm}
 
 	client := http.Client{}
 	res, err := client.Get(ts.URL)
@@ -108,15 +242,16 @@ func TestServerCloseBlocking(t *testing.T) {
 	}))
 
 	// Set the test server config to the mux
-	ts.Config = &m.Server
+	ts.Config = m.Server
 	ts.Start()
 
 	// Create a ListenerMux.
 	lm := &ListenerMux{
 		Listener: ts.Listener,
 		config:   &tls.Config{},
+		cond:     sync.NewCond(&sync.Mutex{}),
 	}
-	m.listener = lm
+	m.listeners = []*ListenerMux{lm}
 
 	dial := func() net.Conn {
 		c, cerr := net.Dial("tcp", ts.Listener.Addr().String())
@@ -168,7 +303,7 @@ func TestListenAndServePlain(t *testing.T) {
 	}))
 
 	// ListenAndServe in a goroutine, but we don't know when it's ready
-	go func() { errc <- m.ListenAndServe() }()
+	go func() { errc <- m.ListenAndServe("", "") }()
 
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
@@ -232,7 +367,7 @@ func TestListenAndServeTLS(t *testing.T) {
 	}
 
 	// ListenAndServe in a goroutine, but we don't know when it's ready
-	go func() { errc <- m.ListenAndServeTLS(certFile, keyFile) }()
+	go func() { errc <- m.ListenAndServe(certFile, keyFile) }()
 
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
@@ -245,14 +380,23 @@ func TestListenAndServeTLS(t *testing.T) {
 			Timeout:   time.Millisecond * 10,
 			Transport: tr,
 		}
-		ok := false
-		for !ok {
+		okTLS := false
+		for !okTLS {
 			res, _ := client.Get("https://" + addr)
 			if res != nil && res.StatusCode == http.StatusOK {
-				ok = true
+				okTLS = true
 			}
 		}
 
+		okNoTLS := false
+		for !okNoTLS {
+			res, _ := client.Get("http://" + addr)
+			// Without TLS we expect a re-direction from http to https
+			// And also the request is not rejected.
+			if res != nil && res.StatusCode == http.StatusOK && res.Request.URL.Scheme == "https" {
+				okNoTLS = true
+			}
+		}
 		wg.Done()
 	}()
 

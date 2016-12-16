@@ -23,11 +23,11 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 
 	"encoding/json"
 
+	humanize "github.com/dustin/go-humanize"
 	"github.com/pkg/profile"
 )
 
@@ -81,7 +81,7 @@ func checkDuplicateEndpoints(endpoints []*url.URL) error {
 
 // Find local node through the command line arguments. Returns in `host:port` format.
 func getLocalAddress(srvCmdConfig serverCmdConfig) string {
-	if !srvCmdConfig.isDistXL {
+	if !globalIsDistXL {
 		return srvCmdConfig.serverAddr
 	}
 	for _, ep := range srvCmdConfig.endpoints {
@@ -113,9 +113,9 @@ func checkValidMD5(md5 string) ([]byte, error) {
 /// http://docs.aws.amazon.com/AmazonS3/latest/dev/UploadingObjects.html
 const (
 	// maximum object size per PUT request is 5GiB
-	maxObjectSize = 1024 * 1024 * 1024 * 5
-	// minimum Part size for multipart upload is 5MB
-	minPartSize = 1024 * 1024 * 5
+	maxObjectSize = 5 * humanize.GiByte
+	// minimum Part size for multipart upload is 5MiB
+	minPartSize = 5 * humanize.MiByte
 	// maximum Part ID for multipart upload is 10000 (Acceptable values range from 1 to 10000 inclusive)
 	maxPartID = 10000
 )
@@ -171,16 +171,14 @@ func urlPathSplit(urlPath string) (bucketName, prefixName string) {
 func startProfiler(profiler string) interface {
 	Stop()
 } {
-	// Set ``MINIO_PROFILE_DIR`` to the directory where profiling information should be persisted
-	profileDir := os.Getenv("MINIO_PROFILE_DIR")
-	// Enable profiler if ``MINIO_PROFILER`` is set. Supported options are [cpu, mem, block].
+	// Enable profiler if ``_MINIO_PROFILER`` is set. Supported options are [cpu, mem, block].
 	switch profiler {
 	case "cpu":
-		return profile.Start(profile.CPUProfile, profile.NoShutdownHook, profile.ProfilePath(profileDir))
+		return profile.Start(profile.CPUProfile, profile.NoShutdownHook)
 	case "mem":
-		return profile.Start(profile.MemProfile, profile.NoShutdownHook, profile.ProfilePath(profileDir))
+		return profile.Start(profile.MemProfile, profile.NoShutdownHook)
 	case "block":
-		return profile.Start(profile.BlockProfile, profile.NoShutdownHook, profile.ProfilePath(profileDir))
+		return profile.Start(profile.BlockProfile, profile.NoShutdownHook)
 	default:
 		return nil
 	}

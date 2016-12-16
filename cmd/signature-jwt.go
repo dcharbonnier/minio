@@ -42,30 +42,26 @@ const (
 )
 
 // newJWT - returns new JWT object.
-func newJWT(expiry time.Duration) (*JWT, error) {
-	if serverConfig == nil {
-		return nil, errors.New("Server not initialized")
+func newJWT(expiry time.Duration, cred credential) (*JWT, error) {
+	if !isValidAccessKey(cred.AccessKeyID) {
+		return nil, errInvalidAccessKeyLength
 	}
-
-	// Save access, secret keys.
-	cred := serverConfig.GetCredential()
-	if !isValidAccessKey.MatchString(cred.AccessKeyID) {
-		return nil, errors.New("Invalid access key")
+	if !isValidSecretKey(cred.SecretAccessKey) {
+		return nil, errInvalidSecretKeyLength
 	}
-	if !isValidSecretKey.MatchString(cred.SecretAccessKey) {
-		return nil, errors.New("Invalid secret key")
-	}
-
 	return &JWT{cred, expiry}, nil
 }
+
+var errInvalidAccessKeyLength = errors.New("Invalid access key, access key should be 5 to 20 characters in length")
+var errInvalidSecretKeyLength = errors.New("Invalid secret key, secret key should be 8 to 40 characters in length")
 
 // GenerateToken - generates a new Json Web Token based on the incoming access key.
 func (jwt *JWT) GenerateToken(accessKey string) (string, error) {
 	// Trim spaces.
 	accessKey = strings.TrimSpace(accessKey)
 
-	if !isValidAccessKey.MatchString(accessKey) {
-		return "", errors.New("Invalid access key")
+	if !isValidAccessKey(accessKey) {
+		return "", errInvalidAccessKeyLength
 	}
 
 	tUTCNow := time.Now().UTC()
@@ -78,20 +74,19 @@ func (jwt *JWT) GenerateToken(accessKey string) (string, error) {
 	return token.SignedString([]byte(jwt.SecretAccessKey))
 }
 
-var errInvalidAccessKeyID = errors.New("The access key ID you provided does not exist in our records.")
-
-var errAuthentication = errors.New("Authentication failed, check your access credentials.")
+var errInvalidAccessKeyID = errors.New("The access key ID you provided does not exist in our records")
+var errAuthentication = errors.New("Authentication failed, check your access credentials")
 
 // Authenticate - authenticates incoming access key and secret key.
 func (jwt *JWT) Authenticate(accessKey, secretKey string) error {
 	// Trim spaces.
 	accessKey = strings.TrimSpace(accessKey)
 
-	if !isValidAccessKey.MatchString(accessKey) {
-		return errors.New("Invalid access key")
+	if !isValidAccessKey(accessKey) {
+		return errInvalidAccessKeyLength
 	}
-	if !isValidSecretKey.MatchString(secretKey) {
-		return errors.New("Invalid secret key")
+	if !isValidSecretKey(secretKey) {
+		return errInvalidSecretKeyLength
 	}
 
 	if accessKey != jwt.AccessKeyID {

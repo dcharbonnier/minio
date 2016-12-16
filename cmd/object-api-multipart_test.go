@@ -18,11 +18,11 @@ package cmd
 
 import (
 	"bytes"
-	"crypto/md5"
-	"encoding/hex"
 	"fmt"
 	"strings"
 	"testing"
+
+	humanize "github.com/dustin/go-humanize"
 )
 
 // Wrapper for calling NewMultipartUpload tests for both XL multiple disks and single node setup.
@@ -1759,12 +1759,6 @@ func TestObjectCompleteMultipartUpload(t *testing.T) {
 
 // Tests validate CompleteMultipart functionality.
 func testObjectCompleteMultipartUpload(obj ObjectLayer, instanceType string, t TestErrHandler) {
-	// Calculates MD5 sum of the given byte array.
-	findMD5 := func(toBeHashed []byte) string {
-		hasher := md5.New()
-		hasher.Write(toBeHashed)
-		return hex.EncodeToString(hasher.Sum(nil))
-	}
 	var err error
 	var uploadID string
 	bucketNames := []string{"minio-bucket", "minio-2-bucket"}
@@ -1790,8 +1784,8 @@ func testObjectCompleteMultipartUpload(obj ObjectLayer, instanceType string, t T
 	uploadIDs = append(uploadIDs, uploadID)
 	// Parts with size greater than 5 MB.
 	// Generating a 6MB byte array.
-	validPart := bytes.Repeat([]byte("abcdef"), 1024*1024)
-	validPartMD5 := findMD5(validPart)
+	validPart := bytes.Repeat([]byte("abcdef"), 1*humanize.MiByte)
+	validPartMD5 := getMD5Hash(validPart)
 	// Create multipart parts.
 	// Need parts to be uploaded before CompleteMultiPartUpload can be called tested.
 	parts := []struct {
@@ -1864,7 +1858,7 @@ func testObjectCompleteMultipartUpload(obj ObjectLayer, instanceType string, t T
 			},
 		},
 	}
-	s3MD5, err := getCompleteMultipartMD5(inputParts[3].parts...)
+	s3MD5, err := getCompleteMultipartMD5(inputParts[3].parts)
 	if err != nil {
 		t.Fatalf("Obtaining S3MD5 failed")
 	}
@@ -1949,41 +1943,41 @@ func testObjectCompleteMultipartUpload(obj ObjectLayer, instanceType string, t T
 
 // BenchmarkPutObjectPart5MbFS - Benchmark FS.PutObjectPart() for object size of 5MB.
 func BenchmarkPutObjectPart5MbFS(b *testing.B) {
-	benchmarkPutObjectPart(b, "FS", 5*1024*1024)
+	benchmarkPutObjectPart(b, "FS", 5*humanize.MiByte)
 }
 
 // BenchmarkPutObjectPart5MbXL - Benchmark XL.PutObjectPart() for object size of 5MB.
 func BenchmarkPutObjectPart5MbXL(b *testing.B) {
-	benchmarkPutObjectPart(b, "XL", 5*1024*1024)
+	benchmarkPutObjectPart(b, "XL", 5*humanize.MiByte)
 }
 
 // BenchmarkPutObjectPart10MbFS - Benchmark FS.PutObjectPart() for object size of 10MB.
 func BenchmarkPutObjectPart10MbFS(b *testing.B) {
-	benchmarkPutObjectPart(b, "FS", 10*1024*1024)
+	benchmarkPutObjectPart(b, "FS", 10*humanize.MiByte)
 }
 
 // BenchmarkPutObjectPart10MbXL - Benchmark XL.PutObjectPart() for object size of 10MB.
 func BenchmarkPutObjectPart10MbXL(b *testing.B) {
-	benchmarkPutObjectPart(b, "XL", 10*1024*1024)
+	benchmarkPutObjectPart(b, "XL", 10*humanize.MiByte)
 }
 
 // BenchmarkPutObjectPart25MbFS - Benchmark FS.PutObjectPart() for object size of 25MB.
 func BenchmarkPutObjectPart25MbFS(b *testing.B) {
-	benchmarkPutObjectPart(b, "FS", 25*1024*1024)
+	benchmarkPutObjectPart(b, "FS", 25*humanize.MiByte)
 
 }
 
 // BenchmarkPutObjectPart25MbXL - Benchmark XL.PutObjectPart() for object size of 25MB.
 func BenchmarkPutObjectPart25MbXL(b *testing.B) {
-	benchmarkPutObjectPart(b, "XL", 25*1024*1024)
+	benchmarkPutObjectPart(b, "XL", 25*humanize.MiByte)
 }
 
 // BenchmarkPutObjectPart50MbFS - Benchmark FS.PutObjectPart() for object size of 50MB.
 func BenchmarkPutObjectPart50MbFS(b *testing.B) {
-	benchmarkPutObjectPart(b, "FS", 50*1024*1024)
+	benchmarkPutObjectPart(b, "FS", 50*humanize.MiByte)
 }
 
 // BenchmarkPutObjectPart50MbXL - Benchmark XL.PutObjectPart() for object size of 50MB.
 func BenchmarkPutObjectPart50MbXL(b *testing.B) {
-	benchmarkPutObjectPart(b, "XL", 50*1024*1024)
+	benchmarkPutObjectPart(b, "XL", 50*humanize.MiByte)
 }

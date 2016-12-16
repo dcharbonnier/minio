@@ -17,9 +17,15 @@
 package cmd
 
 import (
+	"crypto/x509"
+	"os"
+	"strings"
 	"time"
 
+	humanize "github.com/dustin/go-humanize"
 	"github.com/fatih/color"
+	"github.com/minio/cli"
+	"github.com/minio/mc/pkg/console"
 	"github.com/minio/minio/pkg/objcache"
 )
 
@@ -30,9 +36,10 @@ const (
 
 // minio configuration related constants.
 const (
-	globalMinioConfigVersion      = "9"
+	globalMinioConfigVersion      = "11"
 	globalMinioConfigDir          = ".minio"
 	globalMinioCertsDir           = "certs"
+	globalMinioCertsCADir         = "CAs"
 	globalMinioCertFile           = "public.crt"
 	globalMinioKeyFile            = "private.key"
 	globalMinioConfigFile         = "config.json"
@@ -40,16 +47,30 @@ const (
 	// Add new global values here.
 )
 
-var (
-	globalQuiet = false // Quiet flag set via command line
+const (
+	// Limit fields size (except file) to 1Mib since Policy document
+	// can reach that size according to https://aws.amazon.com/articles/1434
+	maxFormFieldSize = int64(1 * humanize.MiByte)
 
+	// The maximum allowed difference between the request generation time and the server processing time
+	globalMaxSkewTime = 15 * time.Minute
+)
+
+var (
+	globalQuiet     = false               // quiet flag set via command line.
+	globalConfigDir = mustGetConfigPath() // config-dir flag set via command line
 	// Add new global flags here.
 
-	// Maximum connections handled per
-	// server, defaults to 0 (unlimited).
-	globalMaxConn = 0
-	// Maximum cache size.
-	globalMaxCacheSize = uint64(maxCacheSize)
+	globalIsDistXL = false // "Is Distributed?" flag.
+
+	// This flag is set to 'true' by default, it is set to `false`
+	// when MINIO_BROWSER env is set to 'off'.
+	globalIsBrowserEnabled = !strings.EqualFold(os.Getenv("MINIO_BROWSER"), "off")
+
+	// Maximum cache size. Defaults to disabled.
+	// Caching is enabled only for RAM size > 8GiB.
+	globalMaxCacheSize = uint64(0)
+
 	// Cache expiry.
 	globalCacheExpiry = objcache.DefaultExpiry
 	// Minio local server address (in `host:port` format)
@@ -61,19 +82,14 @@ var (
 	// Peer communication struct
 	globalS3Peers = s3Peers{}
 
+	// CA root certificates, a nil value means system certs pool will be used
+	globalRootCAs *x509.CertPool
+
+	globalAdminPeers = adminPeers{}
 	// Add new variable global values here.
 )
 
 var (
-	// Limit fields size (except file) to 1Mib since Policy document
-	// can reach that size according to https://aws.amazon.com/articles/1434
-	maxFormFieldSize = int64(1024 * 1024)
-)
-
-var (
-	// The maximum allowed difference between the request generation time and the server processing time
-	globalMaxSkewTime = 15 * time.Minute
-
 	// Keeps the connection active by waiting for following amount of time.
 	// Primarily used in ListenBucketNotification.
 	globalSNSConnAlive = 5 * time.Second
@@ -86,3 +102,19 @@ var (
 	colorBlue  = color.New(color.FgBlue).SprintfFunc()
 	colorGreen = color.New(color.FgGreen).SprintfFunc()
 )
+
+// Parse command arguments and set global variables accordingly
+func setGlobalsFromContext(c *cli.Context) {
+	// Set config dir
+	switch {
+	case c.IsSet("config-dir"):
+		globalConfigDir = c.String("config-dir")
+	case c.GlobalIsSet("config-dir"):
+		globalConfigDir = c.GlobalString("config-dir")
+	}
+	if globalConfigDir == "" {
+		console.Fatalf("Unable to get config file. Config directory is empty.")
+	}
+	// Set global quiet flag.
+	globalQuiet = c.Bool("quiet") || c.GlobalBool("quiet")
+}

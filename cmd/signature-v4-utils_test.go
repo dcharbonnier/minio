@@ -40,7 +40,7 @@ func TestSkipContentSha256Cksum(t *testing.T) {
 		// Test case - 2.
 		// Test case with "X-Amz-Content-Sha256" header set to  "UNSIGNED-PAYLOAD"
 		// When "X-Amz-Content-Sha256" header is set to  "UNSIGNED-PAYLOAD", validation of content sha256 has to be skipped.
-		{"X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD", "", "", true},
+		{"X-Amz-Content-Sha256", unsignedPayload, "", "", true},
 		// Test case - 3.
 		// Enabling PreSigned Signature v4.
 		{"", "", "X-Amz-Credential", "", true},
@@ -86,10 +86,11 @@ func TestIsValidRegion(t *testing.T) {
 		{"us-east-1", "US", true},
 		{"us-west-1", "US", false},
 		{"us-west-1", "us-west-1", true},
+		// "US" was old naming convention for 'us-east-1'.
+		{"US", "US", true},
 	}
 
 	for i, testCase := range testCases {
-
 		actualResult := isValidRegion(testCase.inputReqRegion, testCase.inputConfRegion)
 		if testCase.expectedResult != actualResult {
 			t.Errorf("Test %d: Expected the result to `%v`, but instead got `%v`", i+1, testCase.expectedResult, actualResult)
@@ -209,5 +210,34 @@ func TestFindHost(t *testing.T) {
 	errCode = findHost(signedHeaders)
 	if errCode != ErrNone {
 		t.Fatalf("Expected the APIErrorCode to be %d, but got %d", ErrNone, errCode)
+	}
+}
+
+// TestSignV4TrimAll - tests the logic of TrimAll() function
+func TestSignV4TrimAll(t *testing.T) {
+	testCases := []struct {
+		// Input.
+		inputStr string
+		// Expected result.
+		result string
+	}{
+		{"本語", "本語"},
+		{" abc ", "abc"},
+		{" a b ", "a b"},
+		{"a b ", "a b"},
+		{"a  b", "a b"},
+		{"a   b", "a b"},
+		{"   a   b  c   ", "a b c"},
+		{"a \t b  c   ", "a b c"},
+		{"\"a \t b  c   ", "\"a b c"},
+		{" \t\n\u000b\r\fa \t\n\u000b\r\f b \t\n\u000b\r\f c \t\n\u000b\r\f", "a b c"},
+	}
+
+	// Tests generated values from url encoded name.
+	for i, testCase := range testCases {
+		result := signV4TrimAll(testCase.inputStr)
+		if testCase.result != result {
+			t.Errorf("Test %d: Expected signV4TrimAll result to be \"%s\", but found it to be \"%s\" instead", i+1, testCase.result, result)
+		}
 	}
 }

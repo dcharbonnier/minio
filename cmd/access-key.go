@@ -19,7 +19,6 @@ package cmd
 import (
 	"crypto/rand"
 	"encoding/base64"
-	"regexp"
 )
 
 // credential container for access and secret keys.
@@ -29,15 +28,21 @@ type credential struct {
 }
 
 const (
-	minioAccessID = 20
-	minioSecretID = 40
+	accessKeyMinLen = 5
+	accessKeyMaxLen = 20
+	secretKeyMinLen = 8
+	secretKeyMaxLen = 40
 )
 
-// isValidSecretKey - validate secret key.
-var isValidSecretKey = regexp.MustCompile(`^.{8,40}$`)
+// isValidAccessKey - validate access key for right length.
+func isValidAccessKey(accessKey string) bool {
+	return len(accessKey) >= accessKeyMinLen && len(accessKey) <= accessKeyMaxLen
+}
 
-// isValidAccessKey - validate access key.
-var isValidAccessKey = regexp.MustCompile(`^[a-zA-Z0-9\\-\\.\\_\\~]{5,20}$`)
+// isValidSecretKey - validate secret key for right length.
+func isValidSecretKey(secretKey string) bool {
+	return len(secretKey) >= secretKeyMinLen && len(secretKey) <= secretKeyMaxLen
+}
 
 // mustGenAccessKeys - must generate access credentials.
 func mustGenAccessKeys() (creds credential) {
@@ -66,11 +71,11 @@ func genAccessKeys() (credential, error) {
 // genAccessKeyID - generate random alpha numeric value using only uppercase characters
 // takes input as size in integer
 func genAccessKeyID() ([]byte, error) {
-	alpha := make([]byte, minioAccessID)
+	alpha := make([]byte, accessKeyMaxLen)
 	if _, err := rand.Read(alpha); err != nil {
 		return nil, err
 	}
-	for i := 0; i < minioAccessID; i++ {
+	for i := 0; i < accessKeyMaxLen; i++ {
 		alpha[i] = alphaNumericTable[alpha[i]%byte(len(alphaNumericTable))]
 	}
 	return alpha, nil
@@ -78,9 +83,9 @@ func genAccessKeyID() ([]byte, error) {
 
 // genSecretAccessKey - generate random base64 numeric value from a random seed.
 func genSecretAccessKey() ([]byte, error) {
-	rb := make([]byte, minioSecretID)
+	rb := make([]byte, secretKeyMaxLen)
 	if _, err := rand.Read(rb); err != nil {
 		return nil, err
 	}
-	return []byte(base64.StdEncoding.EncodeToString(rb))[:minioSecretID], nil
+	return []byte(base64.StdEncoding.EncodeToString(rb))[:secretKeyMaxLen], nil
 }

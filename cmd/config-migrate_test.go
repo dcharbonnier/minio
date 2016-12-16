@@ -19,11 +19,8 @@ package cmd
 import (
 	"io/ioutil"
 	"os"
-	"strconv"
 	"testing"
 )
-
-const lastConfigVersion = 9
 
 // Test if config v1 is purged
 func TestServerConfigMigrateV1(t *testing.T) {
@@ -31,7 +28,7 @@ func TestServerConfigMigrateV1(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init Test config failed")
 	}
-	// remove the root folder after the test ends.
+	// remove the root directory after the test ends.
 	defer removeAll(rootPath)
 
 	setGlobalConfigPath(rootPath)
@@ -65,7 +62,7 @@ func TestServerConfigMigrateInexistentConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init Test config failed")
 	}
-	// remove the root folder after the test ends.
+	// remove the root directory after the test ends.
 	defer removeAll(rootPath)
 
 	setGlobalConfigPath(rootPath)
@@ -97,15 +94,21 @@ func TestServerConfigMigrateInexistentConfig(t *testing.T) {
 	if err := migrateV8ToV9(); err != nil {
 		t.Fatal("migrate v8 to v9 should succeed when no config file is found")
 	}
+	if err := migrateV9ToV10(); err != nil {
+		t.Fatal("migrate v9 to v10 should succeed when no config file is found")
+	}
+	if err := migrateV10ToV11(); err != nil {
+		t.Fatal("migrate v10 to v11 should succeed when no config file is found")
+	}
 }
 
-// Test if a config migration from v2 to v9 is successfully done
-func TestServerConfigMigrateV2toV9(t *testing.T) {
+// Test if a config migration from v2 to v11 is successfully done
+func TestServerConfigMigrateV2toV11(t *testing.T) {
 	rootPath, err := newTestConfig("us-east-1")
 	if err != nil {
 		t.Fatalf("Init Test config failed")
 	}
-	// remove the root folder after the test ends.
+	// remove the root directory after the test ends.
 	defer removeAll(rootPath)
 
 	setGlobalConfigPath(rootPath)
@@ -139,7 +142,7 @@ func TestServerConfigMigrateV2toV9(t *testing.T) {
 	}
 
 	// Check the version number in the upgraded config file
-	expectedVersion := strconv.Itoa(lastConfigVersion)
+	expectedVersion := globalMinioConfigVersion
 	if serverConfig.Version != expectedVersion {
 		t.Fatalf("Expect version "+expectedVersion+", found: %v", serverConfig.Version)
 	}
@@ -164,7 +167,7 @@ func TestServerConfigMigrateFaultyConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init Test config failed")
 	}
-	// remove the root folder after the test ends.
+	// remove the root directory after the test ends.
 	defer removeAll(rootPath)
 
 	setGlobalConfigPath(rootPath)
@@ -196,5 +199,11 @@ func TestServerConfigMigrateFaultyConfig(t *testing.T) {
 	}
 	if err := migrateV8ToV9(); err == nil {
 		t.Fatal("migrateConfigV8ToV9() should fail with a corrupted json")
+	}
+	if err := migrateV9ToV10(); err == nil {
+		t.Fatal("migrateConfigV9ToV10() should fail with a corrupted json")
+	}
+	if err := migrateV10ToV11(); err == nil {
+		t.Fatal("migrateConfigV10ToV11() should fail with a corrupted json")
 	}
 }

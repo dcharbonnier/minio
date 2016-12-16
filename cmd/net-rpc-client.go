@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -80,10 +81,16 @@ func (rpcClient *RPCClient) dialRPCClient() (*rpc.Client, error) {
 	if rpcClient.secureConn {
 		hostname, _, splitErr := net.SplitHostPort(rpcClient.node)
 		if splitErr != nil {
-			return nil, errors.New("Unable to parse RPC address <" + rpcClient.node + "> : " + splitErr.Error())
+			err = errors.New("Unable to parse RPC address <" + rpcClient.node + "> : " + splitErr.Error())
+			return nil, &net.OpError{
+				Op:   "dial-http",
+				Net:  rpcClient.node + " " + rpcClient.rpcPath,
+				Addr: nil,
+				Err:  err,
+			}
 		}
 		// ServerName in tls.Config needs to be specified to support SNI certificates
-		conn, err = tls.Dial("tcp", rpcClient.node, &tls.Config{ServerName: hostname})
+		conn, err = tls.Dial("tcp", rpcClient.node, &tls.Config{ServerName: hostname, RootCAs: globalRootCAs})
 	} else {
 		// Have a dial timeout with 3 secs.
 		conn, err = net.DialTimeout("tcp", rpcClient.node, 3*time.Second)
@@ -94,7 +101,12 @@ func (rpcClient *RPCClient) dialRPCClient() (*rpc.Client, error) {
 		case x509.HostnameError:
 			errorIf(err, "Unable to establish RPC to %s", rpcClient.node)
 		}
-		return nil, err
+		return nil, &net.OpError{
+			Op:   "dial-http",
+			Net:  rpcClient.node + " " + rpcClient.rpcPath,
+			Addr: nil,
+			Err:  err,
+		}
 	}
 	io.WriteString(conn, "CONNECT "+rpcClient.rpcPath+" HTTP/1.0\n\n")
 
@@ -103,7 +115,12 @@ func (rpcClient *RPCClient) dialRPCClient() (*rpc.Client, error) {
 	if err == nil && resp.Status == "200 Connected to Go RPC" {
 		rpc := rpc.NewClient(conn)
 		if rpc == nil {
-			return nil, errors.New("No valid RPC Client created after dial")
+			return nil, &net.OpError{
+				Op:   "dial-http",
+				Net:  rpcClient.node + " " + rpcClient.rpcPath,
+				Addr: nil,
+				Err:  fmt.Errorf("Unable to initialize new rpcClient, %s", errUnexpected),
+			}
 		}
 		rpcClient.mu.Lock()
 		rpcClient.rpcPrivate = rpc
@@ -138,23 +155,8 @@ func (rpcClient *RPCClient) Call(serviceMethod string, args interface{}, reply i
 		}
 	}
 
-	// If the RPC fails due to a network-related error, then we reset
-	// rpc.Client for a subsequent reconnect.
-	err := rpcLocalStack.Call(serviceMethod, args, reply)
-	if err != nil {
-		if err.Error() == rpc.ErrShutdown.Error() {
-			// Reset rpcClient.rpc to nil to trigger a reconnect in future
-			// and close the underlying connection.
-			rpcClient.clearRPCClient()
-
-			// Close the underlying connection.
-			rpcLocalStack.Close()
-
-			// Set rpc error as rpc.ErrShutdown type.
-			err = rpc.ErrShutdown
-		}
-	}
-	return err
+	// If the RPC fails due to a network-related error
+	return rpcLocalStack.Call(serviceMethod, args, reply)
 }
 
 // Close closes the underlying socket file descriptor.

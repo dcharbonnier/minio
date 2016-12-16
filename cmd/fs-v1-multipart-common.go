@@ -16,7 +16,10 @@
 
 package cmd
 
-import "path"
+import (
+	"path"
+	"time"
+)
 
 // Returns if the prefix is a multipart upload.
 func (fs fsObjects) isMultipartUpload(bucket, prefix string) bool {
@@ -24,39 +27,24 @@ func (fs fsObjects) isMultipartUpload(bucket, prefix string) bool {
 	return err == nil
 }
 
-// Checks whether bucket exists.
-func (fs fsObjects) isBucketExist(bucket string) bool {
-	// Check whether bucket exists.
-	_, err := fs.storage.StatVol(bucket)
-	if err != nil {
-		if err == errVolumeNotFound {
-			return false
-		}
-		errorIf(err, "Stat failed on bucket "+bucket+".")
-		return false
-	}
-	return true
-}
-
 // isUploadIDExists - verify if a given uploadID exists and is valid.
 func (fs fsObjects) isUploadIDExists(bucket, object, uploadID string) bool {
-	uploadIDPath := path.Join(mpartMetaPrefix, bucket, object, uploadID)
-	_, err := fs.storage.StatFile(minioMetaBucket, path.Join(uploadIDPath, fsMetaJSONFile))
+	uploadIDPath := path.Join(bucket, object, uploadID)
+	_, err := fs.storage.StatFile(minioMetaMultipartBucket, path.Join(uploadIDPath, fsMetaJSONFile))
 	if err != nil {
 		if err == errFileNotFound {
 			return false
 		}
-		errorIf(err, "Unable to access upload id"+uploadIDPath)
+		errorIf(err, "Unable to access upload id "+pathJoin(minioMetaMultipartBucket, uploadIDPath))
 		return false
 	}
 	return true
 }
 
-// writeUploadJSON - create `uploads.json` or update it with new uploadID.
-func (fs fsObjects) updateUploadJSON(bucket, object string, uCh uploadIDChange) error {
-	uploadsPath := path.Join(mpartMetaPrefix, bucket, object, uploadsJSONFile)
-	uniqueID := getUUID()
-	tmpUploadsPath := path.Join(tmpMetaPrefix, uniqueID)
+// updateUploadJSON - add or remove upload ID info in all `uploads.json`.
+func (fs fsObjects) updateUploadJSON(bucket, object, uploadID string, initiated time.Time, isRemove bool) error {
+	uploadsPath := path.Join(bucket, object, uploadsJSONFile)
+	tmpUploadsPath := mustGetUUID()
 
 	uploadsJSON, err := readUploadsJSON(bucket, object, fs.storage)
 	if errorCause(err) == errFileNotFound {
@@ -69,12 +57,12 @@ func (fs fsObjects) updateUploadJSON(bucket, object string, uCh uploadIDChange) 
 	}
 
 	// update the uploadsJSON struct
-	if !uCh.isRemove {
+	if !isRemove {
 		// Add the uploadID
-		uploadsJSON.AddUploadID(uCh.uploadID, uCh.initiated)
+		uploadsJSON.AddUploadID(uploadID, initiated)
 	} else {
 		// Remove the upload ID
-		uploadsJSON.RemoveUploadID(uCh.uploadID)
+		uploadsJSON.RemoveUploadID(uploadID)
 	}
 
 	// update the file or delete it?
@@ -82,9 +70,19 @@ func (fs fsObjects) updateUploadJSON(bucket, object string, uCh uploadIDChange) 
 		err = writeUploadJSON(&uploadsJSON, uploadsPath, tmpUploadsPath, fs.storage)
 	} else {
 		// no uploads, so we delete the file.
-		if err = fs.storage.DeleteFile(minioMetaBucket, uploadsPath); err != nil {
-			return toObjectErr(traceError(err), minioMetaBucket, uploadsPath)
+		if err = fs.storage.DeleteFile(minioMetaMultipartBucket, uploadsPath); err != nil {
+			return toObjectErr(traceError(err), minioMetaMultipartBucket, uploadsPath)
 		}
 	}
 	return err
+}
+
+// addUploadID - add upload ID and its initiated time to 'uploads.json'.
+func (fs fsObjects) addUploadID(bucket, object string, uploadID string, initiated time.Time) error {
+	return fs.updateUploadJSON(bucket, object, uploadID, initiated, false)
+}
+
+// removeUploadID - remove upload ID in 'uploads.json'.
+func (fs fsObjects) removeUploadID(bucket, object string, uploadID string) error {
+	return fs.updateUploadJSON(bucket, object, uploadID, time.Time{}, true)
 }

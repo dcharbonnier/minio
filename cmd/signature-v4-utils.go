@@ -33,10 +33,17 @@ const unsignedPayload = "UNSIGNED-PAYLOAD"
 
 // http Header "x-amz-content-sha256" == "UNSIGNED-PAYLOAD" indicates that the
 // client did not calculate sha256 of the payload. Hence we skip calculating sha256.
-// We also skip calculating sha256 for presigned requests without "x-amz-content-sha256" header.
+// We also skip calculating sha256 for presigned requests without "x-amz-content-sha256"
+// query header.
 func skipContentSha256Cksum(r *http.Request) bool {
-	contentSha256 := r.Header.Get("X-Amz-Content-Sha256")
-	return isRequestUnsignedPayload(r) || (isRequestPresignedSignatureV4(r) && contentSha256 == "")
+	queryContentSha256 := r.URL.Query().Get("X-Amz-Content-Sha256")
+	isRequestPresignedUnsignedPayload := func(r *http.Request) bool {
+		if isRequestPresignedSignatureV4(r) {
+			return queryContentSha256 == "" || queryContentSha256 == unsignedPayload
+		}
+		return false
+	}
+	return isRequestUnsignedPayload(r) || isRequestPresignedUnsignedPayload(r)
 }
 
 // isValidRegion - verify if incoming region value is valid with configured Region.
@@ -86,41 +93,37 @@ func getURLEncodedName(name string) string {
 			continue
 		default:
 			len := utf8.RuneLen(s)
-			if len < 0 {
-				return name
-			}
-			u := make([]byte, len)
-			utf8.EncodeRune(u, s)
-			for _, r := range u {
-				hex := hex.EncodeToString([]byte{r})
-				encodedName = encodedName + "%" + strings.ToUpper(hex)
+			if len > 0 {
+				u := make([]byte, len)
+				utf8.EncodeRune(u, s)
+				for _, r := range u {
+					hex := hex.EncodeToString([]byte{r})
+					encodedName = encodedName + "%" + strings.ToUpper(hex)
+				}
 			}
 		}
 	}
 	return encodedName
 }
 
-// find whether "host" is part of list of signed headers.
 func findHost(signedHeaders []string) APIErrorCode {
-	for _, header := range signedHeaders {
-		if header == "host" {
-			return ErrNone
-		}
+	if contains(signedHeaders, "host") {
+		return ErrNone
 	}
 	return ErrUnsignedHeaders
 }
 
 // extractSignedHeaders extract signed headers from Authorization header
 func extractSignedHeaders(signedHeaders []string, reqHeaders http.Header) (http.Header, APIErrorCode) {
-	errCode := findHost(signedHeaders)
-	if errCode != ErrNone {
-		return nil, errCode
+	// find whether "host" is part of list of signed headers.
+	// if not return ErrUnsignedHeaders. "host" is mandatory.
+	if !contains(signedHeaders, "host") {
+		return nil, ErrUnsignedHeaders
 	}
 	extractedSignedHeaders := make(http.Header)
 	for _, header := range signedHeaders {
 		// `host` will not be found in the headers, can be found in r.Host.
 		// but its alway necessary that the list of signed headers containing host in it.
-
 		val, ok := reqHeaders[http.CanonicalHeaderKey(header)]
 		if !ok {
 			// Golang http server strips off 'Expect' header, if the
@@ -154,6 +157,13 @@ func extractSignedHeaders(signedHeaders []string, reqHeaders http.Header) (http.
 		}
 		extractedSignedHeaders[header] = val
 	}
-
 	return extractedSignedHeaders, ErrNone
+}
+
+// Trim leading and trailing spaces and replace sequential spaces with one space, following Trimall()
+// in http://docs.aws.amazon.com/general/latest/gr/sigv4-create-canonical-request.html
+func signV4TrimAll(input string) string {
+	// Compress adjacent spaces (a space is determined by
+	// unicode.IsSpace() internally here) to one space and return
+	return strings.Join(strings.Fields(input), " ")
 }

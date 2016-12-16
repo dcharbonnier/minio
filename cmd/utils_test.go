@@ -220,6 +220,13 @@ func TestMaxPartID(t *testing.T) {
 	}
 }
 
+// Add tests for starting and stopping different profilers.
+func TestStartProfiler(t *testing.T) {
+	if startProfiler("") != nil {
+		t.Fatal("Expected nil, but non-nil value returned for invalid profiler.")
+	}
+}
+
 // Tests fetch local address.
 func TestLocalAddress(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -229,13 +236,14 @@ func TestLocalAddress(t *testing.T) {
 	globalMinioPort = "9000"
 	globalMinioHost = ""
 	testCases := []struct {
+		isDistXL     bool
 		srvCmdConfig serverCmdConfig
 		localAddr    string
 	}{
 		// Test 1 - local address is found.
 		{
+			isDistXL: true,
 			srvCmdConfig: serverCmdConfig{
-				isDistXL: true,
 				endpoints: []*url.URL{{
 					Scheme: "http",
 					Host:   "localhost:9000",
@@ -258,9 +266,9 @@ func TestLocalAddress(t *testing.T) {
 		},
 		// Test 2 - local address is everything.
 		{
+			isDistXL: false,
 			srvCmdConfig: serverCmdConfig{
 				serverAddr: net.JoinHostPort("", globalMinioPort),
-				isDistXL:   false,
 				endpoints: []*url.URL{{
 					Path: "/mnt/disk1",
 				}, {
@@ -275,8 +283,8 @@ func TestLocalAddress(t *testing.T) {
 		},
 		// Test 3 - local address is not found.
 		{
+			isDistXL: true,
 			srvCmdConfig: serverCmdConfig{
-				isDistXL: true,
 				endpoints: []*url.URL{{
 					Scheme: "http",
 					Host:   "1.1.1.1:9000",
@@ -301,9 +309,9 @@ func TestLocalAddress(t *testing.T) {
 		// name is specified in the --address option on the
 		// server command line.
 		{
+			isDistXL: false,
 			srvCmdConfig: serverCmdConfig{
 				serverAddr: "play.minio.io:9000",
-				isDistXL:   false,
 				endpoints: []*url.URL{{
 					Path: "/mnt/disk1",
 				}, {
@@ -320,6 +328,7 @@ func TestLocalAddress(t *testing.T) {
 
 	// Validates fetching local address.
 	for i, testCase := range testCases {
+		globalIsDistXL = testCase.isDistXL
 		localAddr := getLocalAddress(testCase.srvCmdConfig)
 		if localAddr != testCase.localAddr {
 			t.Fatalf("Test %d: Expected %s, got %s", i+1, testCase.localAddr, localAddr)

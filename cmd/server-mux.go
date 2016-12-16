@@ -17,6 +17,7 @@
 package cmd
 
 import (
+	"bufio"
 	"crypto/tls"
 	"errors"
 	"io"
@@ -26,6 +27,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+)
+
+// The value chosen below is longest word chosen
+// from all the http verbs comprising of
+// "PRI", "OPTIONS", "GET", "HEAD", "POST",
+// "PUT", "DELETE", "TRACE", "CONNECT".
+const (
+	maxHTTPVerbLen = 7
 )
 
 var defaultHTTP2Methods = []string{
@@ -43,64 +52,42 @@ var defaultHTTP1Methods = []string{
 	"CONNECT",
 }
 
-// ConnBuf - contains network buffer to record data
-type ConnBuf struct {
-	buffer []byte
-	unRead bool
-	offset int
-}
-
-// ConnMux - implements a Read() which streams twice the firs bytes from
-// the incoming connection, to help peeking protocol
+// ConnMux - Peeks into the incoming connection for relevant
+// protocol without advancing the underlying net.Conn (io.Reader).
+// ConnMux - allows us to multiplex between TLS and Regular HTTP
+// connections on the same listeners.
 type ConnMux struct {
 	net.Conn
-	lastError error
-	dataBuf   ConnBuf
-}
-
-func longestWord(strings []string) int {
-	maxLen := 0
-	for _, m := range defaultHTTP1Methods {
-		if maxLen < len(m) {
-			maxLen = len(m)
-		}
-	}
-	for _, m := range defaultHTTP2Methods {
-		if maxLen < len(m) {
-			maxLen = len(m)
-		}
-	}
-
-	return maxLen
+	bufrw *bufio.ReadWriter
 }
 
 // NewConnMux - creates a new ConnMux instance
 func NewConnMux(c net.Conn) *ConnMux {
-	h1 := longestWord(defaultHTTP1Methods)
-	h2 := longestWord(defaultHTTP2Methods)
-	max := h1
-	if h2 > max {
-		max = h2
+	br := bufio.NewReader(c)
+	bw := bufio.NewWriter(c)
+	return &ConnMux{
+		Conn:  c,
+		bufrw: bufio.NewReadWriter(br, bw),
 	}
-	return &ConnMux{Conn: c, dataBuf: ConnBuf{buffer: make([]byte, max+1)}}
 }
 
 // PeekProtocol - reads the first bytes, then checks if it is similar
 // to one of the default http methods
 func (c *ConnMux) PeekProtocol() string {
-	var n int
-	n, c.lastError = c.Conn.Read(c.dataBuf.buffer)
-	if n == 0 || (c.lastError != nil && c.lastError != io.EOF) {
-		return ""
+	buf, err := c.bufrw.Peek(maxHTTPVerbLen)
+	if err != nil {
+		if err != io.EOF {
+			errorIf(err, "Unable to peek into the protocol")
+		}
+		return "http"
 	}
-	c.dataBuf.unRead = true
 	for _, m := range defaultHTTP1Methods {
-		if strings.HasPrefix(string(c.dataBuf.buffer), m) {
+		if strings.HasPrefix(string(buf), m) {
 			return "http"
 		}
 	}
 	for _, m := range defaultHTTP2Methods {
-		if strings.HasPrefix(string(c.dataBuf.buffer), m) {
+		if strings.HasPrefix(string(buf), m) {
 			return "http2"
 		}
 	}
@@ -110,64 +97,148 @@ func (c *ConnMux) PeekProtocol() string {
 // Read - streams the ConnMux buffer when reset flag is activated, otherwise
 // streams from the incoming network connection
 func (c *ConnMux) Read(b []byte) (int, error) {
-	if c.dataBuf.unRead {
-		n := copy(b, c.dataBuf.buffer[c.dataBuf.offset:])
-		c.dataBuf.offset += n
-		if c.dataBuf.offset == len(c.dataBuf.buffer) {
-			// We finished copying all c.buffer, reset all
-			c.dataBuf.unRead = false
-			c.dataBuf.offset = 0
-			c.dataBuf.buffer = c.dataBuf.buffer[:]
-			if n < len(b) {
-				// Continue copying from socket if b still has room for data
-				tmpBuffer := make([]byte, len(b)-n-1)
-				nr, err := c.Conn.Read(tmpBuffer)
-				for idx, val := range tmpBuffer {
-					b[n+idx] = val
-				}
-				return n + nr, err
-			}
-		}
-		// We here return the last error
-		return n, c.lastError
-	}
-	return c.Conn.Read(b)
+	return c.bufrw.Read(b)
 }
 
-// ListenerMux - encapuslates the standard net.Listener to inspect
+// Close the connection.
+func (c *ConnMux) Close() (err error) {
+	if err = c.bufrw.Flush(); err != nil {
+		return err
+	}
+	return c.Conn.Close()
+}
+
+// ListenerMux wraps the standard net.Listener to inspect
 // the communication protocol upon network connection
+// ListenerMux also wraps net.Listener to ensure that once
+// Listener.Close returns, the underlying socket has been closed.
+//
+// - https://github.com/golang/go/issues/10527
+//
+// The default Listener returns from Close before the underlying
+// socket has been closed if another goroutine has an active
+// reference (e.g. is in Accept).
+//
+// The following sequence of events can happen:
+//
+// Goroutine 1 is running Accept, and is blocked, waiting for epoll
+//
+// Goroutine 2 calls Close. It sees an extra reference, and so cannot
+//  destroy the socket, but instead decrements a reference, marks the
+//  connection as closed and unblocks epoll.
+//
+// Goroutine 2 returns to the caller, makes a new connection.
+// The new connection is sent to the socket (since it hasn't been destroyed)
+//
+// Goroutine 1 returns from epoll, and accepts the new connection.
+//
+// To avoid accepting connections after Close, we block Goroutine 2
+// from returning from Close till Accept returns an error to the user.
 type ListenerMux struct {
 	net.Listener
 	config *tls.Config
+	// acceptResCh is a channel for transporting wrapped net.Conn (regular or tls)
+	// after peeking the content of the latter
+	acceptResCh chan ListenerMuxAcceptRes
+	// Cond is used to signal Close when there are no references to the listener.
+	cond *sync.Cond
+	refs int
+}
+
+// ListenerMuxAcceptRes contains then final net.Conn data (wrapper by tls or not) to be sent to the http handler
+type ListenerMuxAcceptRes struct {
+	conn net.Conn
+	err  error
+}
+
+// newListenerMux listens and wraps accepted connections with tls after protocol peeking
+func newListenerMux(listener net.Listener, config *tls.Config) *ListenerMux {
+	l := ListenerMux{
+		Listener:    listener,
+		config:      config,
+		cond:        sync.NewCond(&sync.Mutex{}),
+		acceptResCh: make(chan ListenerMuxAcceptRes),
+	}
+	// Start listening, wrap connections with tls when needed
+	go func() {
+		// Loop for accepting new connections
+		for {
+			conn, err := l.Listener.Accept()
+			if err != nil {
+				l.acceptResCh <- ListenerMuxAcceptRes{err: err}
+				return
+			}
+			// Wrap the connection with ConnMux to be able to peek the data in the incoming connection
+			// and decide if we need to wrap the connection itself with a TLS or not
+			go func(conn net.Conn) {
+				connMux := NewConnMux(conn)
+				if connMux.PeekProtocol() == "tls" {
+					l.acceptResCh <- ListenerMuxAcceptRes{conn: tls.Server(connMux, l.config)}
+				} else {
+					l.acceptResCh <- ListenerMuxAcceptRes{conn: connMux}
+				}
+			}(conn)
+		}
+	}()
+	return &l
+}
+
+// IsClosed - Returns if the underlying listener is closed fully.
+func (l *ListenerMux) IsClosed() bool {
+	l.cond.L.Lock()
+	defer l.cond.L.Unlock()
+	return l.refs == 0
+}
+
+func (l *ListenerMux) incRef() {
+	l.cond.L.Lock()
+	l.refs++
+	l.cond.L.Unlock()
+}
+
+func (l *ListenerMux) decRef() {
+	l.cond.L.Lock()
+	l.refs--
+	newRefs := l.refs
+	l.cond.L.Unlock()
+	if newRefs == 0 {
+		l.cond.Broadcast()
+	}
+}
+
+// Close closes the listener.
+// Any blocked Accept operations will be unblocked and return errors.
+func (l *ListenerMux) Close() error {
+	if l == nil {
+		return nil
+	}
+
+	if err := l.Listener.Close(); err != nil {
+		return err
+	}
+
+	l.cond.L.Lock()
+	for l.refs > 0 {
+		l.cond.Wait()
+	}
+	l.cond.L.Unlock()
+	return nil
 }
 
 // Accept - peek the protocol to decide if we should wrap the
 // network stream with the TLS server
 func (l *ListenerMux) Accept() (net.Conn, error) {
-	conn, err := l.Listener.Accept()
-	if err != nil {
-		return conn, err
-	}
-	connMux := NewConnMux(conn)
-	protocol := connMux.PeekProtocol()
-	if protocol == "tls" {
-		return tls.Server(connMux, l.config), nil
-	}
-	return connMux, nil
-}
+	l.incRef()
+	defer l.decRef()
 
-// Close Listener
-func (l *ListenerMux) Close() error {
-	if l == nil {
-		return nil
-	}
-	return l.Listener.Close()
+	res := <-l.acceptResCh
+	return res.conn, res.err
 }
 
 // ServerMux - the main mux server
 type ServerMux struct {
-	http.Server
-	listener        *ListenerMux
+	*http.Server
+	listeners       []*ListenerMux
 	WaitGroup       *sync.WaitGroup
 	GracefulTimeout time.Duration
 	mu              sync.Mutex // guards closed, conns, and listener
@@ -178,7 +249,7 @@ type ServerMux struct {
 // NewServerMux constructor to create a ServerMux
 func NewServerMux(addr string, handler http.Handler) *ServerMux {
 	m := &ServerMux{
-		Server: http.Server{
+		Server: &http.Server{
 			Addr: addr,
 			// Do not add any timeouts Golang net.Conn
 			// closes connections right after 10mins even
@@ -199,97 +270,129 @@ func NewServerMux(addr string, handler http.Handler) *ServerMux {
 	return m
 }
 
-// ListenAndServeTLS - similar to the http.Server version. However, it has the
-// ability to redirect http requests to the correct HTTPS url if the client
-// mistakenly initiates a http connection over the https port
-func (m *ServerMux) ListenAndServeTLS(certFile, keyFile string) (err error) {
-	config := &tls.Config{} // Always instantiate.
-	if config.NextProtos == nil {
-		config.NextProtos = []string{"http/1.1", "h2"}
-	}
-	config.Certificates = make([]tls.Certificate, 1)
-	config.Certificates[0], err = tls.LoadX509KeyPair(certFile, keyFile)
+// Initialize listeners on all ports.
+func initListeners(serverAddr string, tls *tls.Config) ([]*ListenerMux, error) {
+	host, port, err := net.SplitHostPort(serverAddr)
 	if err != nil {
-		return err
+		return nil, err
 	}
-
-	go m.handleServiceSignals()
-
-	listener, err := net.Listen("tcp", m.Server.Addr)
-	if err != nil {
-		return err
+	var listeners []*ListenerMux
+	if host == "" {
+		var listener net.Listener
+		listener, err = net.Listen("tcp", serverAddr)
+		if err != nil {
+			return nil, err
+		}
+		listeners = append(listeners, newListenerMux(listener, tls))
+		return listeners, nil
 	}
-
-	listenerMux := &ListenerMux{Listener: listener, config: config}
-
-	m.mu.Lock()
-	m.listener = listenerMux
-	m.mu.Unlock()
-
-	err = http.Serve(listenerMux,
-		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// We reach here when ListenerMux.ConnMux is not wrapped with tls.Server
-			if r.TLS == nil {
-				u := url.URL{
-					Scheme:   "https",
-					Opaque:   r.URL.Opaque,
-					User:     r.URL.User,
-					Host:     r.Host,
-					Path:     r.URL.Path,
-					RawQuery: r.URL.RawQuery,
-					Fragment: r.URL.Fragment,
-				}
-				http.Redirect(w, r, u.String(), http.StatusMovedPermanently)
-			} else {
-				// Execute registered handlers
-				m.Server.Handler.ServeHTTP(w, r)
-			}
-		}),
-	)
-	if nerr, ok := err.(*net.OpError); ok {
-		if nerr.Op == "accept" && nerr.Net == "tcp" {
-			return nil
+	var addrs []string
+	if net.ParseIP(host) != nil {
+		addrs = append(addrs, host)
+	} else {
+		addrs, err = net.LookupHost(host)
+		if err != nil {
+			return nil, err
+		}
+		if len(addrs) == 0 {
+			return nil, errUnexpected
 		}
 	}
-	return err
+	for _, addr := range addrs {
+		var listener net.Listener
+		listener, err = net.Listen("tcp", net.JoinHostPort(addr, port))
+		if err != nil {
+			return nil, err
+		}
+		listeners = append(listeners, newListenerMux(listener, tls))
+	}
+	return listeners, nil
 }
 
-// ListenAndServe - Same as the http.Server version
-func (m *ServerMux) ListenAndServe() error {
+// ListenAndServe - serve HTTP requests with protocol multiplexing support
+// TLS is actived when certFile and keyFile parameters are not empty.
+func (m *ServerMux) ListenAndServe(certFile, keyFile string) (err error) {
+
+	tlsEnabled := certFile != "" && keyFile != ""
+
+	config := &tls.Config{} // Always instantiate.
+
+	if tlsEnabled {
+		// Configure TLS in the server
+		if config.NextProtos == nil {
+			config.NextProtos = []string{"http/1.1", "h2"}
+		}
+		config.Certificates = make([]tls.Certificate, 1)
+		config.Certificates[0], err = tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return err
+		}
+	}
+
 	go m.handleServiceSignals()
 
-	listener, err := net.Listen("tcp", m.Server.Addr)
+	listeners, err := initListeners(m.Server.Addr, config)
 	if err != nil {
 		return err
 	}
 
-	listenerMux := &ListenerMux{Listener: listener, config: &tls.Config{}}
-
 	m.mu.Lock()
-	m.listener = listenerMux
+	m.listeners = listeners
 	m.mu.Unlock()
 
-	err = m.Server.Serve(listenerMux)
-	if nerr, ok := err.(*net.OpError); ok {
-		if nerr.Op == "accept" && nerr.Net == "tcp" {
-			return nil
+	// All http requests start to be processed by httpHandler
+	httpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if tlsEnabled && r.TLS == nil {
+			// TLS is enabled but Request is not TLS configured
+			u := url.URL{
+				Scheme:   "https",
+				Opaque:   r.URL.Opaque,
+				User:     r.URL.User,
+				Host:     r.Host,
+				Path:     r.URL.Path,
+				RawQuery: r.URL.RawQuery,
+				Fragment: r.URL.Fragment,
+			}
+			http.Redirect(w, r, u.String(), http.StatusTemporaryRedirect)
+		} else {
+			// Execute registered handlers
+			m.Server.Handler.ServeHTTP(w, r)
 		}
+	})
+
+	var wg = &sync.WaitGroup{}
+	for _, listener := range listeners {
+		wg.Add(1)
+		go func(listener *ListenerMux) {
+			defer wg.Done()
+			serr := http.Serve(listener, httpHandler)
+			// Do not print the error if the listener is closed.
+			if !listener.IsClosed() {
+				errorIf(serr, "Unable to serve incoming requests.")
+			}
+		}(listener)
 	}
-	return err
+	// Wait for all http.Serve's to return.
+	wg.Wait()
+	return nil
 }
 
 // Close initiates the graceful shutdown
 func (m *ServerMux) Close() error {
 	m.mu.Lock()
 	if m.closed {
+		m.mu.Unlock()
 		return errors.New("Server has been closed")
 	}
 	// Closed completely.
 	m.closed = true
 
-	// Close the listener.
-	if err := m.listener.Close(); err != nil {
-		return err
+	// Close the listeners.
+	for _, listener := range m.listeners {
+		if err := listener.Close(); err != nil {
+			m.mu.Unlock()
+			return err
+		}
 	}
 
 	m.SetKeepAlivesEnabled(false)

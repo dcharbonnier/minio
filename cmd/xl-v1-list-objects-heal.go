@@ -143,11 +143,9 @@ func (xl xlObjects) listObjectsHeal(bucket, prefix, marker, delimiter string, ma
 			continue
 		}
 
-		// get a random ID for lock instrumentation.
-		opsID := getOpsID()
-
 		// Check if the current object needs healing
-		nsMutex.RLock(bucket, objInfo.Name, opsID)
+		objectLock := globalNSMutex.NewNSLock(bucket, objInfo.Name)
+		objectLock.RLock()
 		partsMetadata, errs := readAllXLMetadata(xl.storageDisks, bucket, objInfo.Name)
 		if xlShouldHeal(partsMetadata, errs) {
 			result.Objects = append(result.Objects, ObjectInfo{
@@ -157,38 +155,15 @@ func (xl xlObjects) listObjectsHeal(bucket, prefix, marker, delimiter string, ma
 				IsDir:   false,
 			})
 		}
-		nsMutex.RUnlock(bucket, objInfo.Name, opsID)
+		objectLock.RUnlock()
 	}
 	return result, nil
 }
 
 // ListObjects - list all objects at prefix, delimited by '/'.
 func (xl xlObjects) ListObjectsHeal(bucket, prefix, marker, delimiter string, maxKeys int) (ListObjectsInfo, error) {
-	// Verify if bucket is valid.
-	if !IsValidBucketName(bucket) {
-		return ListObjectsInfo{}, traceError(BucketNameInvalid{Bucket: bucket})
-	}
-	// Verify if bucket exists.
-	if !xl.isBucketExist(bucket) {
-		return ListObjectsInfo{}, traceError(BucketNotFound{Bucket: bucket})
-	}
-	if !IsValidObjectPrefix(prefix) {
-		return ListObjectsInfo{}, traceError(ObjectNameInvalid{Bucket: bucket, Object: prefix})
-	}
-	// Verify if delimiter is anything other than '/', which we do not support.
-	if delimiter != "" && delimiter != slashSeparator {
-		return ListObjectsInfo{}, traceError(UnsupportedDelimiter{
-			Delimiter: delimiter,
-		})
-	}
-	// Verify if marker has prefix.
-	if marker != "" {
-		if !strings.HasPrefix(marker, prefix) {
-			return ListObjectsInfo{}, traceError(InvalidMarkerPrefixCombination{
-				Marker: marker,
-				Prefix: prefix,
-			})
-		}
+	if err := checkListObjsArgs(bucket, prefix, marker, delimiter, xl); err != nil {
+		return ListObjectsInfo{}, err
 	}
 
 	// With max keys of zero we have reached eof, return right here.

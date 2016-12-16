@@ -51,20 +51,21 @@ func testListObjects(obj ObjectLayer, instanceType string, t TestErrHandler) {
 	testObjects := []struct {
 		name    string
 		content string
+		meta    map[string]string
 	}{
-		{"Asia-maps", "asis-maps"},
-		{"Asia/India/India-summer-photos-1", "contentstring"},
-		{"Asia/India/Karnataka/Bangalore/Koramangala/pics", "contentstring"},
-		{"newPrefix0", "newPrefix0"},
-		{"newPrefix1", "newPrefix1"},
-		{"newzen/zen/recurse/again/again/again/pics", "recurse"},
-		{"obj0", "obj0"},
-		{"obj1", "obj1"},
-		{"obj2", "obj2"},
+		{"Asia-maps.png", "asis-maps", map[string]string{"content-type": "image/png"}},
+		{"Asia/India/India-summer-photos-1", "contentstring", nil},
+		{"Asia/India/Karnataka/Bangalore/Koramangala/pics", "contentstring", nil},
+		{"newPrefix0", "newPrefix0", nil},
+		{"newPrefix1", "newPrefix1", nil},
+		{"newzen/zen/recurse/again/again/again/pics", "recurse", nil},
+		{"obj0", "obj0", nil},
+		{"obj1", "obj1", nil},
+		{"obj2", "obj2", nil},
 	}
 	sha256sum := ""
 	for _, object := range testObjects {
-		_, err = obj.PutObject(testBuckets[0], object.name, int64(len(object.content)), bytes.NewBufferString(object.content), nil, sha256sum)
+		_, err = obj.PutObject(testBuckets[0], object.name, int64(len(object.content)), bytes.NewBufferString(object.content), object.meta, sha256sum)
 		if err != nil {
 			t.Fatalf("%s : %s", instanceType, err.Error())
 		}
@@ -80,7 +81,7 @@ func testListObjects(obj ObjectLayer, instanceType string, t TestErrHandler) {
 		{
 			IsTruncated: false,
 			Objects: []ObjectInfo{
-				{Name: "Asia-maps"},
+				{Name: "Asia-maps.png", ContentType: "image/png"},
 				{Name: "Asia/India/India-summer-photos-1"},
 				{Name: "Asia/India/Karnataka/Bangalore/Koramangala/pics"},
 				{Name: "newPrefix0"},
@@ -96,7 +97,7 @@ func testListObjects(obj ObjectLayer, instanceType string, t TestErrHandler) {
 		{
 			IsTruncated: true,
 			Objects: []ObjectInfo{
-				{Name: "Asia-maps"},
+				{Name: "Asia-maps.png", ContentType: "image/png"},
 				{Name: "Asia/India/India-summer-photos-1"},
 				{Name: "Asia/India/Karnataka/Bangalore/Koramangala/pics"},
 				{Name: "newPrefix0"},
@@ -108,7 +109,7 @@ func testListObjects(obj ObjectLayer, instanceType string, t TestErrHandler) {
 		{
 			IsTruncated: true,
 			Objects: []ObjectInfo{
-				{Name: "Asia-maps"},
+				{Name: "Asia-maps.png", ContentType: "image/png"},
 				{Name: "Asia/India/India-summer-photos-1"},
 				{Name: "Asia/India/Karnataka/Bangalore/Koramangala/pics"},
 				{Name: "newPrefix0"},
@@ -119,7 +120,7 @@ func testListObjects(obj ObjectLayer, instanceType string, t TestErrHandler) {
 		{
 			IsTruncated: true,
 			Objects: []ObjectInfo{
-				{Name: "Asia-maps"},
+				{Name: "Asia-maps.png", ContentType: "image/png"},
 				{Name: "Asia/India/India-summer-photos-1"},
 				{Name: "Asia/India/Karnataka/Bangalore/Koramangala/pics"},
 			},
@@ -130,7 +131,7 @@ func testListObjects(obj ObjectLayer, instanceType string, t TestErrHandler) {
 		{
 			IsTruncated: true,
 			Objects: []ObjectInfo{
-				{Name: "Asia-maps"},
+				{Name: "Asia-maps.png", ContentType: "image/png"},
 			},
 		},
 		// ListObjectsResult-5.
@@ -233,7 +234,7 @@ func testListObjects(obj ObjectLayer, instanceType string, t TestErrHandler) {
 		{
 			IsTruncated: false,
 			Objects: []ObjectInfo{
-				{Name: "Asia-maps"},
+				{Name: "Asia-maps.png", ContentType: "image/png"},
 				{Name: "Asia/India/India-summer-photos-1"},
 				{Name: "Asia/India/Karnataka/Bangalore/Koramangala/pics"},
 				{Name: "newPrefix0"},
@@ -342,7 +343,7 @@ func testListObjects(obj ObjectLayer, instanceType string, t TestErrHandler) {
 		{
 			IsTruncated: false,
 			Objects: []ObjectInfo{
-				{Name: "Asia-maps"},
+				{Name: "Asia-maps.png", ContentType: "image/png"},
 				{Name: "Asia/India/India-summer-photos-1"},
 				{Name: "Asia/India/Karnataka/Bangalore/Koramangala/pics"},
 			},
@@ -353,7 +354,7 @@ func testListObjects(obj ObjectLayer, instanceType string, t TestErrHandler) {
 		{
 			IsTruncated: false,
 			Objects: []ObjectInfo{
-				{Name: "Asia-maps"},
+				{Name: "Asia-maps.png", ContentType: "image/png"},
 			},
 		},
 		// ListObjectsResult-26.
@@ -548,6 +549,10 @@ func testListObjects(obj ObjectLayer, instanceType string, t TestErrHandler) {
 				if testCase.result.Objects[j].Name != result.Objects[j].Name {
 					t.Errorf("Test %d: %s: Expected object name to be \"%s\", but found \"%s\" instead", i+1, instanceType, testCase.result.Objects[j].Name, result.Objects[j].Name)
 				}
+				if testCase.result.Objects[j].ContentType != result.Objects[j].ContentType {
+					t.Errorf("Test %d: %s: Expected object contentType to be \"%s\", but found \"%s\" instead", i+1, instanceType, testCase.result.Objects[j].ContentType, result.Objects[j].ContentType)
+				}
+
 			}
 			if testCase.result.IsTruncated != result.IsTruncated {
 				t.Errorf("Test %d: %s: Expected IsTruncated flag to be %v, but instead found it to be %v", i+1, instanceType, testCase.result.IsTruncated, result.IsTruncated)
@@ -564,44 +569,51 @@ func testListObjects(obj ObjectLayer, instanceType string, t TestErrHandler) {
 	}
 }
 
+// Initialize FS backend for the benchmark.
 func initFSObjectsB(disk string, t *testing.B) (obj ObjectLayer) {
 	endPoints, err := parseStorageEndpoints([]string{disk})
 	if err != nil {
 		t.Fatal("Unexpected err: ", err)
 	}
 
-	storageDisks, err := initStorageDisks(endPoints, nil)
+	obj, _, err = initObjectLayer(endPoints)
 	if err != nil {
 		t.Fatal("Unexpected err: ", err)
 	}
-	obj, err = newFSObjects(storageDisks[0])
-	if err != nil {
-		t.Fatal("Unexpected err: ", err)
-	}
+
 	return obj
 }
 
+// BenchmarkListObjects - Run ListObject Repeatedly and benchmark.
 func BenchmarkListObjects(b *testing.B) {
 	// Make a temporary directory to use as the obj.
-	directory, err := ioutil.TempDir("", "minio-list-benchmark")
+	directory, err := ioutil.TempDir(globalTestTmpDir, "minio-list-benchmark")
 	if err != nil {
 		b.Fatal(err)
 	}
 	defer removeAll(directory)
+	// initialize the root directory.
+	rootPath, err := newTestConfig("us-east-1")
+	if err != nil {
+		b.Fatalf("Unable to initialize config. %s", err)
+	}
 
+	defer removeAll(rootPath)
 	// Create the obj.
 	obj := initFSObjectsB(directory, b)
 
+	bucket := "ls-benchmark-bucket"
 	// Create a bucket.
-	err = obj.MakeBucket("ls-benchmark-bucket")
+	err = obj.MakeBucket(bucket)
 	if err != nil {
 		b.Fatal(err)
 	}
 
 	sha256sum := ""
+	// Insert objects to be listed and benchmarked later.
 	for i := 0; i < 20000; i++ {
 		key := "obj" + strconv.Itoa(i)
-		_, err = obj.PutObject("ls-benchmark-bucket", key, int64(len(key)), bytes.NewBufferString(key), nil, sha256sum)
+		_, err = obj.PutObject(bucket, key, int64(len(key)), bytes.NewBufferString(key), nil, sha256sum)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -611,7 +623,7 @@ func BenchmarkListObjects(b *testing.B) {
 
 	// List the buckets over and over and over.
 	for i := 0; i < b.N; i++ {
-		_, err = obj.ListObjects("ls-benchmark-bucket", "", "obj9000", "", -1)
+		_, err = obj.ListObjects(bucket, "", "obj9000", "", -1)
 		if err != nil {
 			b.Fatal(err)
 		}

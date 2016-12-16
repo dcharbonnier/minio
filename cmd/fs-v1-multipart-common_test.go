@@ -17,49 +17,15 @@
 package cmd
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
-// TestFSIsBucketExist - complete test of isBucketExist
-func TestFSIsBucketExist(t *testing.T) {
-	// Prepare for testing
-	disk := filepath.Join(os.TempDir(), "minio-"+nextSuffix())
-	defer removeAll(disk)
-
-	obj := initFSObjects(disk, t)
-	fs := obj.(fsObjects)
-	bucketName := "bucket"
-
-	if err := obj.MakeBucket(bucketName); err != nil {
-		t.Fatal("Cannot create bucket, err: ", err)
-	}
-
-	// Test with a valid bucket
-	if found := fs.isBucketExist(bucketName); !found {
-		t.Fatal("isBucketExist should true")
-	}
-
-	// Test with a inexistant bucket
-	if found := fs.isBucketExist("foo"); found {
-		t.Fatal("isBucketExist should false")
-	}
-
-	// Using a faulty disk
-	fsStorage := fs.storage.(*posix)
-	naughty := newNaughtyDisk(fsStorage, nil, errFaultyDisk)
-	fs.storage = naughty
-	if found := fs.isBucketExist(bucketName); found {
-		t.Fatal("isBucketExist should return false because it is wired to a corrupted disk")
-	}
-}
-
 // TestFSIsUploadExists - complete test with valid and invalid cases
 func TestFSIsUploadExists(t *testing.T) {
 	// Prepare for testing
-	disk := filepath.Join(os.TempDir(), "minio-"+nextSuffix())
+	disk := filepath.Join(globalTestTmpDir, "minio-"+nextSuffix())
 	defer removeAll(disk)
 
 	obj := initFSObjects(disk, t)
@@ -92,7 +58,7 @@ func TestFSIsUploadExists(t *testing.T) {
 	}
 
 	// isUploadIdExists with a faulty disk should return false
-	fsStorage := fs.storage.(*posix)
+	fsStorage := fs.storage.(*retryStorage)
 	naughty := newNaughtyDisk(fsStorage, nil, errFaultyDisk)
 	fs.storage = naughty
 	if exists := fs.isUploadIDExists(bucketName, objectName, uploadID); exists {
@@ -103,7 +69,7 @@ func TestFSIsUploadExists(t *testing.T) {
 // TestFSWriteUploadJSON - tests for writeUploadJSON for FS
 func TestFSWriteUploadJSON(t *testing.T) {
 	// Prepare for tests
-	disk := filepath.Join(os.TempDir(), "minio-"+nextSuffix())
+	disk := filepath.Join(globalTestTmpDir, "minio-"+nextSuffix())
 	defer removeAll(disk)
 
 	obj := initFSObjects(disk, t)
@@ -122,17 +88,16 @@ func TestFSWriteUploadJSON(t *testing.T) {
 		t.Fatal("Unexpected err: ", err)
 	}
 
-	if err := fs.updateUploadJSON(bucketName, objectName, uploadIDChange{uploadID, time.Now().UTC(), false}); err != nil {
+	if err := fs.addUploadID(bucketName, objectName, uploadID, time.Now().UTC()); err != nil {
 		t.Fatal("Unexpected err: ", err)
 	}
 
 	// isUploadIdExists with a faulty disk should return false
-	fsStorage := fs.storage.(*posix)
+	fsStorage := fs.storage.(*retryStorage)
 	for i := 1; i <= 3; i++ {
 		naughty := newNaughtyDisk(fsStorage, map[int]error{i: errFaultyDisk}, nil)
 		fs.storage = naughty
-		if err := fs.updateUploadJSON(bucketName, objectName,
-			uploadIDChange{uploadID, time.Now().UTC(), false}); errorCause(err) != errFaultyDisk {
+		if err := fs.addUploadID(bucketName, objectName, uploadID, time.Now().UTC()); errorCause(err) != errFaultyDisk {
 			t.Fatal("Unexpected err: ", err)
 		}
 	}

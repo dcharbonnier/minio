@@ -48,26 +48,20 @@ func createLockTestServer(t *testing.T) (string, *lockServer, string) {
 		t.Fatalf("unable initialize config file, %s", err)
 	}
 
-	jwt, err := newJWT(defaultJWTExpiry)
-	if err != nil {
-		t.Fatalf("unable to get new JWT, %s", err)
-	}
-
-	err = jwt.Authenticate(serverConfig.GetCredential().AccessKeyID, serverConfig.GetCredential().SecretAccessKey)
-	if err != nil {
-		t.Fatalf("unable for JWT to authenticate, %s", err)
-	}
-
-	token, err := jwt.GenerateToken(serverConfig.GetCredential().AccessKeyID)
-	if err != nil {
-		t.Fatalf("unable for JWT to generate token, %s", err)
-	}
-
 	locker := &lockServer{
-		rpcPath: "rpc-path",
-		mutex:   sync.Mutex{},
-		lockMap: make(map[string][]lockRequesterInfo),
+		loginServer: loginServer{},
+		rpcPath:     "rpc-path",
+		mutex:       sync.Mutex{},
+		lockMap:     make(map[string][]lockRequesterInfo),
 	}
+	creds := serverConfig.GetCredential()
+	loginArgs := RPCLoginArgs{Username: creds.AccessKeyID, Password: creds.SecretAccessKey}
+	loginReply := RPCLoginReply{}
+	err = locker.LoginHandler(&loginArgs, &loginReply)
+	if err != nil {
+		t.Fatalf("Failed to login to lock server - %v", err)
+	}
+	token := loginReply.Token
 
 	return testPath, locker, token
 }
@@ -447,13 +441,14 @@ func TestLockServers(t *testing.T) {
 	}
 	globalMinioHost = ""
 	testCases := []struct {
+		isDistXL         bool
 		srvCmdConfig     serverCmdConfig
 		totalLockServers int
 	}{
 		// Test - 1 one lock server initialized.
 		{
+			isDistXL: true,
 			srvCmdConfig: serverCmdConfig{
-				isDistXL: true,
 				endpoints: []*url.URL{{
 					Scheme: "http",
 					Host:   "localhost:9000",
@@ -474,10 +469,10 @@ func TestLockServers(t *testing.T) {
 			},
 			totalLockServers: 1,
 		},
-		// Test - 2 two servers possible, 1 ignored.
+		// Test - 2 two servers possible.
 		{
+			isDistXL: true,
 			srvCmdConfig: serverCmdConfig{
-				isDistXL: true,
 				endpoints: []*url.URL{{
 					Scheme: "http",
 					Host:   "localhost:9000",
@@ -495,18 +490,14 @@ func TestLockServers(t *testing.T) {
 					Host:   "1.1.2.2:9000",
 					Path:   "/mnt/disk4",
 				}},
-				ignoredEndpoints: []*url.URL{{
-					Scheme: "http",
-					Host:   "localhost:9000",
-					Path:   "/mnt/disk2",
-				}},
 			},
-			totalLockServers: 1,
+			totalLockServers: 2,
 		},
 	}
 
 	// Validates lock server initialization.
 	for i, testCase := range testCases {
+		globalIsDistXL = testCase.isDistXL
 		lockServers := newLockServers(testCase.srvCmdConfig)
 		if len(lockServers) != testCase.totalLockServers {
 			t.Fatalf("Test %d: Expected total %d, got %d", i+1, testCase.totalLockServers, len(lockServers))

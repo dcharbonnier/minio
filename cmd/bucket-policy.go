@@ -75,9 +75,8 @@ func loadAllBucketPolicies(objAPI ObjectLayer) (policies map[string]*bucketPolic
 	// List buckets to proceed loading all notification configuration.
 	buckets, err := objAPI.ListBuckets()
 	errorIf(err, "Unable to list buckets.")
-	err = errorCause(err)
 	if err != nil {
-		return nil, err
+		return nil, errorCause(err)
 	}
 
 	policies = make(map[string]*bucketPolicy)
@@ -86,11 +85,13 @@ func loadAllBucketPolicies(objAPI ObjectLayer) (policies map[string]*bucketPolic
 	for _, bucket := range buckets {
 		policy, pErr := readBucketPolicy(bucket.Name, objAPI)
 		if pErr != nil {
-			switch pErr.(type) {
-			case BucketPolicyNotFound:
-				continue
+			// net.Dial fails for rpc client or any
+			// other unexpected errors during net.Dial.
+			if !isErrIgnored(pErr, errDiskNotFound) {
+				if !isErrBucketPolicyNotFound(pErr) {
+					pErrs = append(pErrs, pErr)
+				}
 			}
-			pErrs = append(pErrs, pErr)
 			// Continue to load other bucket policies if possible.
 			continue
 		}
@@ -142,30 +143,29 @@ func getOldBucketsConfigPath() (string, error) {
 // readBucketPolicyJSON - reads bucket policy for an input bucket, returns BucketPolicyNotFound
 // if bucket policy is not found.
 func readBucketPolicyJSON(bucket string, objAPI ObjectLayer) (bucketPolicyReader io.Reader, err error) {
-	// Verify if bucket actually exists
-	if err = isBucketExist(bucket, objAPI); err != nil {
-		return nil, err
-	}
-
 	policyPath := pathJoin(bucketConfigPrefix, bucket, policyJSON)
+
+	// Acquire a read lock on policy config before reading.
+	objLock := globalNSMutex.NewNSLock(minioMetaBucket, policyPath)
+	objLock.RLock()
+	defer objLock.RUnlock()
+
 	objInfo, err := objAPI.GetObjectInfo(minioMetaBucket, policyPath)
-	err = errorCause(err)
 	if err != nil {
-		if _, ok := err.(ObjectNotFound); ok {
+		if isErrObjectNotFound(err) || isErrIncompleteBody(err) {
 			return nil, BucketPolicyNotFound{Bucket: bucket}
 		}
 		errorIf(err, "Unable to load policy for the bucket %s.", bucket)
-		return nil, err
+		return nil, errorCause(err)
 	}
 	var buffer bytes.Buffer
 	err = objAPI.GetObject(minioMetaBucket, policyPath, 0, objInfo.Size, &buffer)
-	err = errorCause(err)
 	if err != nil {
-		if _, ok := err.(ObjectNotFound); ok {
+		if isErrObjectNotFound(err) || isErrIncompleteBody(err) {
 			return nil, BucketPolicyNotFound{Bucket: bucket}
 		}
 		errorIf(err, "Unable to load policy for the bucket %s.", bucket)
-		return nil, err
+		return nil, errorCause(err)
 	}
 
 	return &buffer, nil
@@ -194,6 +194,10 @@ func readBucketPolicy(bucket string, objAPI ObjectLayer) (*bucketPolicy, error) 
 // if no policies are found.
 func removeBucketPolicy(bucket string, objAPI ObjectLayer) error {
 	policyPath := pathJoin(bucketConfigPrefix, bucket, policyJSON)
+	// Acquire a write lock on policy config before modifying.
+	objLock := globalNSMutex.NewNSLock(minioMetaBucket, policyPath)
+	objLock.Lock()
+	defer objLock.Unlock()
 	if err := objAPI.DeleteObject(minioMetaBucket, policyPath); err != nil {
 		errorIf(err, "Unable to remove bucket-policy on bucket %s.", bucket)
 		err = errorCause(err)
@@ -205,8 +209,7 @@ func removeBucketPolicy(bucket string, objAPI ObjectLayer) error {
 	return nil
 }
 
-// writeBucketPolicy - save a bucket policy that is assumed to be
-// validated.
+// writeBucketPolicy - save a bucket policy that is assumed to be validated.
 func writeBucketPolicy(bucket string, objAPI ObjectLayer, bpy *bucketPolicy) error {
 	buf, err := json.Marshal(bpy)
 	if err != nil {
@@ -214,9 +217,70 @@ func writeBucketPolicy(bucket string, objAPI ObjectLayer, bpy *bucketPolicy) err
 		return err
 	}
 	policyPath := pathJoin(bucketConfigPrefix, bucket, policyJSON)
+	// Acquire a write lock on policy config before modifying.
+	objLock := globalNSMutex.NewNSLock(minioMetaBucket, policyPath)
+	objLock.Lock()
+	defer objLock.Unlock()
 	if _, err := objAPI.PutObject(minioMetaBucket, policyPath, int64(len(buf)), bytes.NewReader(buf), nil, ""); err != nil {
 		errorIf(err, "Unable to set policy for the bucket %s", bucket)
 		return errorCause(err)
 	}
+	return nil
+}
+
+func parseAndPersistBucketPolicy(bucket string, policyBytes []byte, objAPI ObjectLayer) APIErrorCode {
+	// Parse bucket policy.
+	var policy = &bucketPolicy{}
+	err := parseBucketPolicy(bytes.NewReader(policyBytes), policy)
+	if err != nil {
+		errorIf(err, "Unable to parse bucket policy.")
+		return ErrInvalidPolicyDocument
+	}
+
+	// Parse check bucket policy.
+	if s3Error := checkBucketPolicyResources(bucket, policy); s3Error != ErrNone {
+		return s3Error
+	}
+
+	// Acquire a write lock on bucket before modifying its configuration.
+	bucketLock := globalNSMutex.NewNSLock(bucket, "")
+	bucketLock.Lock()
+	// Release lock after notifying peers
+	defer bucketLock.Unlock()
+
+	// Save bucket policy.
+	if err = persistAndNotifyBucketPolicyChange(bucket, policyChange{false, policy}, objAPI); err != nil {
+		switch err.(type) {
+		case BucketNameInvalid:
+			return ErrInvalidBucketName
+		case BucketNotFound:
+			return ErrNoSuchBucket
+		default:
+			errorIf(err, "Unable to save bucket policy.")
+			return ErrInternalError
+		}
+	}
+	return ErrNone
+}
+
+// persistAndNotifyBucketPolicyChange - takes a policyChange argument,
+// persists it to storage, and notify nodes in the cluster about the
+// change. In-memory state is updated in response to the notification.
+func persistAndNotifyBucketPolicyChange(bucket string, pCh policyChange, objAPI ObjectLayer) error {
+	if pCh.IsRemove {
+		if err := removeBucketPolicy(bucket, objAPI); err != nil {
+			return err
+		}
+	} else {
+		if pCh.BktPolicy == nil {
+			return errInvalidArgument
+		}
+		if err := writeBucketPolicy(bucket, objAPI, pCh.BktPolicy); err != nil {
+			return err
+		}
+	}
+
+	// Notify all peers (including self) to update in-memory state
+	S3PeersUpdateBucketPolicy(bucket, pCh)
 	return nil
 }

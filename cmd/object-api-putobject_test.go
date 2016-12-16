@@ -24,18 +24,12 @@ import (
 	"os"
 	"path"
 	"testing"
+
+	humanize "github.com/dustin/go-humanize"
 )
 
-// md5Hex ignores error from Write method since it never returns one. Check
-// crypto/md5 doc for more details.
-func md5Hex(b []byte) string {
-	md5Writer := md5.New()
-	md5Writer.Write(b)
-	return hex.EncodeToString(md5Writer.Sum(nil))
-}
-
 func md5Header(data []byte) map[string]string {
-	return map[string]string{"md5Sum": md5Hex([]byte(data))}
+	return map[string]string{"md5Sum": getMD5Hash([]byte(data))}
 }
 
 // Wrapper for calling PutObject tests for both XL multiple disks and single node setup.
@@ -66,9 +60,9 @@ func testObjectAPIPutObject(obj ObjectLayer, instanceType string, t TestErrHandl
 	var (
 		nilBytes    []byte
 		data        = []byte("hello")
-		fiveMBBytes = bytes.Repeat([]byte("a"), 5*1024*124)
+		fiveMBBytes = bytes.Repeat([]byte("a"), 5*humanize.MiByte)
 	)
-	invalidMD5 := md5Hex([]byte("meh"))
+	invalidMD5 := getMD5Hash([]byte("meh"))
 	invalidMD5Header := md5Header([]byte("meh"))
 
 	testCases := []struct {
@@ -126,37 +120,37 @@ func testObjectAPIPutObject(obj ObjectLayer, instanceType string, t TestErrHandl
 
 		// Test case 15-17.
 		// With no metadata
-		{bucket, object, data, nil, "", int64(len(data)), md5Hex(data), nil},
-		{bucket, object, nilBytes, nil, "", int64(len(nilBytes)), md5Hex(nilBytes), nil},
-		{bucket, object, fiveMBBytes, nil, "", int64(len(fiveMBBytes)), md5Hex(fiveMBBytes), nil},
+		{bucket, object, data, nil, "", int64(len(data)), getMD5Hash(data), nil},
+		{bucket, object, nilBytes, nil, "", int64(len(nilBytes)), getMD5Hash(nilBytes), nil},
+		{bucket, object, fiveMBBytes, nil, "", int64(len(fiveMBBytes)), getMD5Hash(fiveMBBytes), nil},
 
 		// Test case 18-20.
 		// With arbitrary metadata
-		{bucket, object, data, map[string]string{"answer": "42"}, "", int64(len(data)), md5Hex(data), nil},
-		{bucket, object, nilBytes, map[string]string{"answer": "42"}, "", int64(len(nilBytes)), md5Hex(nilBytes), nil},
-		{bucket, object, fiveMBBytes, map[string]string{"answer": "42"}, "", int64(len(fiveMBBytes)), md5Hex(fiveMBBytes), nil},
+		{bucket, object, data, map[string]string{"answer": "42"}, "", int64(len(data)), getMD5Hash(data), nil},
+		{bucket, object, nilBytes, map[string]string{"answer": "42"}, "", int64(len(nilBytes)), getMD5Hash(nilBytes), nil},
+		{bucket, object, fiveMBBytes, map[string]string{"answer": "42"}, "", int64(len(fiveMBBytes)), getMD5Hash(fiveMBBytes), nil},
 
 		// Test case 21-23.
 		// With valid md5sum and sha256.
-		{bucket, object, data, md5Header(data), hex.EncodeToString(sum256(data)), int64(len(data)), md5Hex(data), nil},
-		{bucket, object, nilBytes, md5Header(nilBytes), hex.EncodeToString(sum256(nilBytes)), int64(len(nilBytes)), md5Hex(nilBytes), nil},
-		{bucket, object, fiveMBBytes, md5Header(fiveMBBytes), hex.EncodeToString(sum256(fiveMBBytes)), int64(len(fiveMBBytes)), md5Hex(fiveMBBytes), nil},
+		{bucket, object, data, md5Header(data), getSHA256Hash(data), int64(len(data)), getMD5Hash(data), nil},
+		{bucket, object, nilBytes, md5Header(nilBytes), getSHA256Hash(nilBytes), int64(len(nilBytes)), getMD5Hash(nilBytes), nil},
+		{bucket, object, fiveMBBytes, md5Header(fiveMBBytes), getSHA256Hash(fiveMBBytes), int64(len(fiveMBBytes)), getMD5Hash(fiveMBBytes), nil},
 
 		// Test case 24-26.
 		// data with invalid md5sum in header
-		{bucket, object, data, invalidMD5Header, "", int64(len(data)), md5Hex(data), BadDigest{invalidMD5, md5Hex(data)}},
-		{bucket, object, nilBytes, invalidMD5Header, "", int64(len(nilBytes)), md5Hex(nilBytes), BadDigest{invalidMD5, md5Hex(nilBytes)}},
-		{bucket, object, fiveMBBytes, invalidMD5Header, "", int64(len(fiveMBBytes)), md5Hex(fiveMBBytes), BadDigest{invalidMD5, md5Hex(fiveMBBytes)}},
+		{bucket, object, data, invalidMD5Header, "", int64(len(data)), getMD5Hash(data), BadDigest{invalidMD5, getMD5Hash(data)}},
+		{bucket, object, nilBytes, invalidMD5Header, "", int64(len(nilBytes)), getMD5Hash(nilBytes), BadDigest{invalidMD5, getMD5Hash(nilBytes)}},
+		{bucket, object, fiveMBBytes, invalidMD5Header, "", int64(len(fiveMBBytes)), getMD5Hash(fiveMBBytes), BadDigest{invalidMD5, getMD5Hash(fiveMBBytes)}},
 
 		// Test case 27-29.
 		// data with size different from the actual number of bytes available in the reader
-		{bucket, object, data, nil, "", int64(len(data) - 1), md5Hex(data[:len(data)-1]), nil},
-		{bucket, object, nilBytes, nil, "", int64(len(nilBytes) + 1), md5Hex(nilBytes), IncompleteBody{}},
-		{bucket, object, fiveMBBytes, nil, "", int64(0), md5Hex(fiveMBBytes), nil},
+		{bucket, object, data, nil, "", int64(len(data) - 1), getMD5Hash(data[:len(data)-1]), nil},
+		{bucket, object, nilBytes, nil, "", int64(len(nilBytes) + 1), getMD5Hash(nilBytes), IncompleteBody{}},
+		{bucket, object, fiveMBBytes, nil, "", int64(0), getMD5Hash(fiveMBBytes), nil},
 
 		// Test case 30
 		// valid data with X-Amz-Meta- meta
-		{bucket, object, data, map[string]string{"X-Amz-Meta-AppID": "a42"}, "", int64(len(data)), md5Hex(data), nil},
+		{bucket, object, data, map[string]string{"X-Amz-Meta-AppID": "a42"}, "", int64(len(data)), getMD5Hash(data), nil},
 	}
 
 	for i, testCase := range testCases {
@@ -325,9 +319,9 @@ func testObjectAPIPutObjectStaleFiles(obj ObjectLayer, instanceType string, disk
 	}
 
 	for _, disk := range disks {
-		tmpMetaDir := path.Join(disk, minioMetaBucket, tmpMetaPrefix)
+		tmpMetaDir := path.Join(disk, minioMetaTmpBucket)
 		if !isDirEmpty(tmpMetaDir) {
-			t.Fatalf("%s: expected: empty, got: non-empty", tmpMetaDir)
+			t.Fatalf("%s: expected: empty, got: non-empty", minioMetaTmpBucket)
 		}
 	}
 }
@@ -358,7 +352,7 @@ func testObjectAPIMultipartPutObjectStaleFiles(obj ObjectLayer, instanceType str
 	}
 
 	// Upload part1.
-	fiveMBBytes := bytes.Repeat([]byte("a"), 5*1024*1024)
+	fiveMBBytes := bytes.Repeat([]byte("a"), 5*humanize.MiByte)
 	md5Writer := md5.New()
 	md5Writer.Write(fiveMBBytes)
 	etag1 := hex.EncodeToString(md5Writer.Sum(nil))
@@ -392,7 +386,7 @@ func testObjectAPIMultipartPutObjectStaleFiles(obj ObjectLayer, instanceType str
 	}
 
 	for _, disk := range disks {
-		tmpMetaDir := path.Join(disk, minioMetaBucket, tmpMetaPrefix)
+		tmpMetaDir := path.Join(disk, minioMetaTmpBucket)
 		files, err := ioutil.ReadDir(tmpMetaDir)
 		if err != nil {
 			// Its OK to have non-existen tmpMetaDir.
@@ -426,73 +420,73 @@ func BenchmarkPutObjectVerySmallXL(b *testing.B) {
 
 // BenchmarkPutObject10KbFS - Benchmark FS.PutObject() for object size of 10KB.
 func BenchmarkPutObject10KbFS(b *testing.B) {
-	benchmarkPutObject(b, "FS", 10*1024)
+	benchmarkPutObject(b, "FS", 10*humanize.KiByte)
 }
 
 // BenchmarkPutObject10KbXL - Benchmark XL.PutObject() for object size of 10KB.
 func BenchmarkPutObject10KbXL(b *testing.B) {
-	benchmarkPutObject(b, "XL", 10*1024)
+	benchmarkPutObject(b, "XL", 10*humanize.KiByte)
 }
 
 // BenchmarkPutObject100KbFS - Benchmark FS.PutObject() for object size of 100KB.
 func BenchmarkPutObject100KbFS(b *testing.B) {
-	benchmarkPutObject(b, "FS", 100*1024)
+	benchmarkPutObject(b, "FS", 100*humanize.KiByte)
 }
 
 // BenchmarkPutObject100KbXL - Benchmark XL.PutObject() for object size of 100KB.
 func BenchmarkPutObject100KbXL(b *testing.B) {
-	benchmarkPutObject(b, "XL", 100*1024)
+	benchmarkPutObject(b, "XL", 100*humanize.KiByte)
 }
 
 // BenchmarkPutObject1MbFS - Benchmark FS.PutObject() for object size of 1MB.
 func BenchmarkPutObject1MbFS(b *testing.B) {
-	benchmarkPutObject(b, "FS", 1024*1024)
+	benchmarkPutObject(b, "FS", 1*humanize.MiByte)
 }
 
 // BenchmarkPutObject1MbXL - Benchmark XL.PutObject() for object size of 1MB.
 func BenchmarkPutObject1MbXL(b *testing.B) {
-	benchmarkPutObject(b, "XL", 1024*1024)
+	benchmarkPutObject(b, "XL", 1*humanize.MiByte)
 }
 
 // BenchmarkPutObject5MbFS - Benchmark FS.PutObject() for object size of 5MB.
 func BenchmarkPutObject5MbFS(b *testing.B) {
-	benchmarkPutObject(b, "FS", 5*1024*1024)
+	benchmarkPutObject(b, "FS", 5*humanize.MiByte)
 }
 
 // BenchmarkPutObject5MbXL - Benchmark XL.PutObject() for object size of 5MB.
 func BenchmarkPutObject5MbXL(b *testing.B) {
-	benchmarkPutObject(b, "XL", 5*1024*1024)
+	benchmarkPutObject(b, "XL", 5*humanize.MiByte)
 }
 
 // BenchmarkPutObject10MbFS - Benchmark FS.PutObject() for object size of 10MB.
 func BenchmarkPutObject10MbFS(b *testing.B) {
-	benchmarkPutObject(b, "FS", 10*1024*1024)
+	benchmarkPutObject(b, "FS", 10*humanize.MiByte)
 }
 
 // BenchmarkPutObject10MbXL - Benchmark XL.PutObject() for object size of 10MB.
 func BenchmarkPutObject10MbXL(b *testing.B) {
-	benchmarkPutObject(b, "XL", 10*1024*1024)
+	benchmarkPutObject(b, "XL", 10*humanize.MiByte)
 }
 
 // BenchmarkPutObject25MbFS - Benchmark FS.PutObject() for object size of 25MB.
 func BenchmarkPutObject25MbFS(b *testing.B) {
-	benchmarkPutObject(b, "FS", 25*1024*1024)
+	benchmarkPutObject(b, "FS", 25*humanize.MiByte)
 
 }
 
 // BenchmarkPutObject25MbXL - Benchmark XL.PutObject() for object size of 25MB.
 func BenchmarkPutObject25MbXL(b *testing.B) {
-	benchmarkPutObject(b, "XL", 25*1024*1024)
+	benchmarkPutObject(b, "XL", 25*humanize.MiByte)
 }
 
 // BenchmarkPutObject50MbFS - Benchmark FS.PutObject() for object size of 50MB.
 func BenchmarkPutObject50MbFS(b *testing.B) {
-	benchmarkPutObject(b, "FS", 50*1024*1024)
+	benchmarkPutObject(b, "FS", 50*humanize.MiByte)
 }
 
 // BenchmarkPutObject50MbXL - Benchmark XL.PutObject() for object size of 50MB.
 func BenchmarkPutObject50MbXL(b *testing.B) {
-	benchmarkPutObject(b, "XL", 50*1024*1024)
+	benchmarkPutObject(b, "XL", 50*humanize.MiByte)
 }
 
 // parallel benchmarks for ObjectLayer.PutObject() .
@@ -509,61 +503,61 @@ func BenchmarkParallelPutObjectVerySmallXL(b *testing.B) {
 
 // BenchmarkParallelPutObject10KbFS - BenchmarkParallel FS.PutObject() for object size of 10KB.
 func BenchmarkParallelPutObject10KbFS(b *testing.B) {
-	benchmarkPutObjectParallel(b, "FS", 10*1024)
+	benchmarkPutObjectParallel(b, "FS", 10*humanize.KiByte)
 }
 
 // BenchmarkParallelPutObject10KbXL - BenchmarkParallel XL.PutObject() for object size of 10KB.
 func BenchmarkParallelPutObject10KbXL(b *testing.B) {
-	benchmarkPutObjectParallel(b, "XL", 10*1024)
+	benchmarkPutObjectParallel(b, "XL", 10*humanize.KiByte)
 }
 
 // BenchmarkParallelPutObject100KbFS - BenchmarkParallel FS.PutObject() for object size of 100KB.
 func BenchmarkParallelPutObject100KbFS(b *testing.B) {
-	benchmarkPutObjectParallel(b, "FS", 100*1024)
+	benchmarkPutObjectParallel(b, "FS", 100*humanize.KiByte)
 }
 
 // BenchmarkParallelPutObject100KbXL - BenchmarkParallel XL.PutObject() for object size of 100KB.
 func BenchmarkParallelPutObject100KbXL(b *testing.B) {
-	benchmarkPutObjectParallel(b, "XL", 100*1024)
+	benchmarkPutObjectParallel(b, "XL", 100*humanize.KiByte)
 }
 
 // BenchmarkParallelPutObject1MbFS - BenchmarkParallel FS.PutObject() for object size of 1MB.
 func BenchmarkParallelPutObject1MbFS(b *testing.B) {
-	benchmarkPutObjectParallel(b, "FS", 1024*1024)
+	benchmarkPutObjectParallel(b, "FS", 1*humanize.MiByte)
 }
 
 // BenchmarkParallelPutObject1MbXL - BenchmarkParallel XL.PutObject() for object size of 1MB.
 func BenchmarkParallelPutObject1MbXL(b *testing.B) {
-	benchmarkPutObjectParallel(b, "XL", 1024*1024)
+	benchmarkPutObjectParallel(b, "XL", 1*humanize.MiByte)
 }
 
 // BenchmarkParallelPutObject5MbFS - BenchmarkParallel FS.PutObject() for object size of 5MB.
 func BenchmarkParallelPutObject5MbFS(b *testing.B) {
-	benchmarkPutObjectParallel(b, "FS", 5*1024*1024)
+	benchmarkPutObjectParallel(b, "FS", 5*humanize.MiByte)
 }
 
 // BenchmarkParallelPutObject5MbXL - BenchmarkParallel XL.PutObject() for object size of 5MB.
 func BenchmarkParallelPutObject5MbXL(b *testing.B) {
-	benchmarkPutObjectParallel(b, "XL", 5*1024*1024)
+	benchmarkPutObjectParallel(b, "XL", 5*humanize.MiByte)
 }
 
 // BenchmarkParallelPutObject10MbFS - BenchmarkParallel FS.PutObject() for object size of 10MB.
 func BenchmarkParallelPutObject10MbFS(b *testing.B) {
-	benchmarkPutObjectParallel(b, "FS", 10*1024*1024)
+	benchmarkPutObjectParallel(b, "FS", 10*humanize.MiByte)
 }
 
 // BenchmarkParallelPutObject10MbXL - BenchmarkParallel XL.PutObject() for object size of 10MB.
 func BenchmarkParallelPutObject10MbXL(b *testing.B) {
-	benchmarkPutObjectParallel(b, "XL", 10*1024*1024)
+	benchmarkPutObjectParallel(b, "XL", 10*humanize.MiByte)
 }
 
 // BenchmarkParallelPutObject25MbFS - BenchmarkParallel FS.PutObject() for object size of 25MB.
 func BenchmarkParallelPutObject25MbFS(b *testing.B) {
-	benchmarkPutObjectParallel(b, "FS", 25*1024*1024)
+	benchmarkPutObjectParallel(b, "FS", 25*humanize.MiByte)
 
 }
 
 // BenchmarkParallelPutObject25MbXL - BenchmarkParallel XL.PutObject() for object size of 25MB.
 func BenchmarkParallelPutObject25MbXL(b *testing.B) {
-	benchmarkPutObjectParallel(b, "XL", 25*1024*1024)
+	benchmarkPutObjectParallel(b, "XL", 25*humanize.MiByte)
 }

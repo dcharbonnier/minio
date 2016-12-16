@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"path"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -47,13 +46,21 @@ func (api objectAPIHandlers) GetBucketNotificationHandler(w http.ResponseWriter,
 		return
 	}
 
-	// Validate request authorization.
-	if s3Error := checkAuth(r); s3Error != ErrNone {
+	if s3Error := checkRequestAuthType(r, "", "", serverConfig.GetRegion()); s3Error != ErrNone {
 		writeErrorResponse(w, r, s3Error, r.URL.Path)
 		return
 	}
+
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
+
+	_, err := objAPI.GetBucketInfo(bucket)
+	if err != nil {
+		errorIf(err, "Unable to find bucket info.")
+		writeErrorResponse(w, r, toAPIErrorCode(err), r.URL.Path)
+		return
+	}
+
 	// Attempt to successfully load notification config.
 	nConfig, err := loadNotificationConfig(bucket, objAPI)
 	if err != nil && err != errNoSuchNotifications {
@@ -92,11 +99,11 @@ func (api objectAPIHandlers) PutBucketNotificationHandler(w http.ResponseWriter,
 		return
 	}
 
-	// Validate request authorization.
-	if s3Error := checkAuth(r); s3Error != ErrNone {
+	if s3Error := checkRequestAuthType(r, "", "", serverConfig.GetRegion()); s3Error != ErrNone {
 		writeErrorResponse(w, r, s3Error, r.URL.Path)
 		return
 	}
+
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
 
@@ -166,10 +173,10 @@ func PutBucketNotificationConfig(bucket string, ncfg *notificationConfig, objAPI
 
 	// Acquire a write lock on bucket before modifying its
 	// configuration.
-	opsID := getOpsID()
-	nsMutex.Lock(bucket, "", opsID)
+	bucketLock := globalNSMutex.NewNSLock(bucket, "")
+	bucketLock.Lock()
 	// Release lock after notifying peers
-	defer nsMutex.Unlock(bucket, "", opsID)
+	defer bucketLock.Unlock()
 
 	// persist config to disk
 	err := persistNotificationConfig(bucket, ncfg, objAPI)
@@ -177,8 +184,7 @@ func PutBucketNotificationConfig(bucket string, ncfg *notificationConfig, objAPI
 		return fmt.Errorf("Unable to persist Bucket notification config to object layer - config=%v errMsg=%v", *ncfg, err)
 	}
 
-	// All servers (including local) are told to update in-memory
-	// config
+	// All servers (including local) are told to update in-memory config
 	S3PeersUpdateBucketNotification(bucket, ncfg)
 
 	return nil
@@ -247,11 +253,11 @@ func (api objectAPIHandlers) ListenBucketNotificationHandler(w http.ResponseWrit
 		return
 	}
 
-	// Validate request authorization.
-	if s3Error := checkAuth(r); s3Error != ErrNone {
+	if s3Error := checkRequestAuthType(r, "", "", serverConfig.GetRegion()); s3Error != ErrNone {
 		writeErrorResponse(w, r, s3Error, r.URL.Path)
 		return
 	}
+
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
 
@@ -374,13 +380,13 @@ func AddBucketListenerConfig(bucket string, lcfg *listenerConfig, objAPI ObjectL
 
 	// Acquire a write lock on bucket before modifying its
 	// configuration.
-	opsID := getOpsID()
-	nsMutex.Lock(bucket, "", opsID)
+	bucketLock := globalNSMutex.NewNSLock(bucket, "")
+	bucketLock.Lock()
 	// Release lock after notifying peers
-	defer nsMutex.Unlock(bucket, "", opsID)
+	defer bucketLock.Unlock()
 
 	// update persistent config if dist XL
-	if globalS3Peers.isDistXL {
+	if globalIsDistXL {
 		err := persistListenerConfig(bucket, listenerCfgs, objAPI)
 		if err != nil {
 			errorIf(err, "Error persisting listener config when adding a listener.")
@@ -416,13 +422,13 @@ func RemoveBucketListenerConfig(bucket string, lcfg *listenerConfig, objAPI Obje
 
 	// Acquire a write lock on bucket before modifying its
 	// configuration.
-	opsID := getOpsID()
-	nsMutex.Lock(bucket, "", opsID)
+	bucketLock := globalNSMutex.NewNSLock(bucket, "")
+	bucketLock.Lock()
 	// Release lock after notifying peers
-	defer nsMutex.Unlock(bucket, "", opsID)
+	defer bucketLock.Unlock()
 
 	// update persistent config if dist XL
-	if globalS3Peers.isDistXL {
+	if globalIsDistXL {
 		err := persistListenerConfig(bucket, updatedLcfgs, objAPI)
 		if err != nil {
 			errorIf(err, "Error persisting listener config when removing a listener.")
@@ -433,15 +439,4 @@ func RemoveBucketListenerConfig(bucket string, lcfg *listenerConfig, objAPI Obje
 	// persistence success - now update in-memory globals on all
 	// peers (including local)
 	S3PeersUpdateBucketListener(bucket, updatedLcfgs)
-}
-
-// Removes notification.xml for a given bucket, only used during DeleteBucket.
-func removeNotificationConfig(bucket string, objAPI ObjectLayer) error {
-	// Verify bucket is valid.
-	if !IsValidBucketName(bucket) {
-		return BucketNameInvalid{Bucket: bucket}
-	}
-
-	notificationConfigPath := path.Join(bucketConfigPrefix, bucket, bucketNotificationConfig)
-	return objAPI.DeleteObject(minioMetaBucket, notificationConfigPath)
 }

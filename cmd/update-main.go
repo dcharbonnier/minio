@@ -18,7 +18,6 @@ package cmd
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"io/ioutil"
 	"net/http"
@@ -32,22 +31,12 @@ import (
 	"github.com/minio/mc/pkg/console"
 )
 
-// command specific flags.
-var (
-	updateFlags = []cli.Flag{
-		cli.BoolFlag{
-			Name:  "experimental, E",
-			Usage: "Check experimental update.",
-		},
-	}
-)
-
 // Check for new software updates.
 var updateCmd = cli.Command{
 	Name:   "update",
 	Usage:  "Check for a new software update.",
 	Action: mainUpdate,
-	Flags:  append(updateFlags, globalFlags...),
+	Flags:  globalFlags,
 	CustomHelpTemplate: `Name:
    minio {{.Name}} - {{.Usage}}
 
@@ -60,24 +49,19 @@ FLAGS:
 EXAMPLES:
    1. Check for any new official release.
       $ minio {{.Name}}
-
-   2. Check for any new experimental release.
-      $ minio {{.Name}} --experimental
 `,
 }
 
 // update URL endpoints.
 const (
-	minioUpdateStableURL       = "https://dl.minio.io/server/minio/release"
-	minioUpdateExperimentalURL = "https://dl.minio.io/server/minio/experimental"
+	minioUpdateStableURL = "https://dl.minio.io/server/minio/release"
 )
 
 // updateMessage container to hold update messages.
 type updateMessage struct {
-	Status   string `json:"status"`
-	Update   bool   `json:"update"`
-	Download string `json:"downloadURL"`
-	Version  string `json:"version"`
+	Update    bool          `json:"update"`
+	Download  string        `json:"downloadURL"`
+	NewerThan time.Duration `json:"newerThan"`
 }
 
 // String colorized update message.
@@ -86,17 +70,8 @@ func (u updateMessage) String() string {
 		updateMessage := color.New(color.FgGreen, color.Bold).SprintfFunc()
 		return updateMessage("You are already running the most recent version of ‘minio’.")
 	}
-	msg := colorizeUpdateMessage(u.Download)
+	msg := colorizeUpdateMessage(u.Download, u.NewerThan)
 	return msg
-}
-
-// JSON jsonified update message.
-func (u updateMessage) JSON() string {
-	u.Status = "success"
-	updateMessageJSONBytes, err := json.Marshal(u)
-	fatalIf((err), "Unable to marshal into JSON.")
-
-	return string(updateMessageJSONBytes)
 }
 
 func parseReleaseData(data string) (time.Time, error) {
@@ -142,11 +117,39 @@ var (
 // Check if the operating system is a docker container.
 func isDocker() bool {
 	cgroup, err := ioutil.ReadFile("/proc/self/cgroup")
-	if err != nil && os.IsNotExist(err) {
-		return false
+	if err != nil && !os.IsNotExist(err) {
+		errorIf(err, "Unable to read `cgroup` file.")
 	}
-	fatalIf(err, "Unable to read `cgroup` file.")
+
 	return bytes.Contains(cgroup, []byte("docker"))
+}
+
+// Check if the minio server binary was built with source.
+func isSourceBuild() bool {
+	return Version == "DEVELOPMENT.GOGET"
+}
+
+// Fetch the current version of the Minio server binary.
+func getCurrentMinioVersion() (current time.Time, err error) {
+	// For development builds we check for binary modTime
+	// to validate against latest minio server release.
+	if Version != "DEVELOPMENT.GOGET" {
+		// Parse current minio version into RFC3339.
+		current, err = time.Parse(time.RFC3339, Version)
+		if err != nil {
+			return time.Time{}, err
+		}
+		return current, nil
+	} // else {
+	// For all development builds through `go get`.
+	// fall back to looking for version of the build
+	// date of the binary itself.
+	var fi os.FileInfo
+	fi, err = os.Stat(os.Args[0])
+	if err != nil {
+		return time.Time{}, err
+	}
+	return fi.ModTime(), nil
 }
 
 // verify updates for releases.
@@ -157,19 +160,22 @@ func getReleaseUpdate(updateURL string, duration time.Duration) (updateMsg updat
 
 	// Get the downloadURL.
 	var downloadURL string
-	switch runtime.GOOS {
-	case "windows":
-		// For windows.
-		downloadURL = newUpdateURLPrefix + "/minio.exe"
-	default:
-		// For all other operating systems.
-		downloadURL = newUpdateURLPrefix + "/minio"
+	if isDocker() {
+		downloadURL = "docker pull minio/minio"
+	} else {
+		switch runtime.GOOS {
+		case "windows":
+			// For windows.
+			downloadURL = newUpdateURLPrefix + "/minio.exe"
+		default:
+			// For all other operating systems.
+			downloadURL = newUpdateURLPrefix + "/minio"
+		}
 	}
 
 	// Initialize update message.
 	updateMsg = updateMessage{
 		Download: downloadURL,
-		Version:  Version,
 	}
 
 	// Instantiate a new client with 3 sec timeout.
@@ -177,17 +183,9 @@ func getReleaseUpdate(updateURL string, duration time.Duration) (updateMsg updat
 		Timeout: duration,
 	}
 
-	// Parse current minio version into RFC3339.
-	current, err := time.Parse(time.RFC3339, Version)
+	current, err := getCurrentMinioVersion()
 	if err != nil {
-		errMsg = "Unable to parse version string as time."
-		return
-	}
-
-	// Verify if current minio version is zero.
-	if current.IsZero() {
-		err = errors.New("date should not be zero")
-		errMsg = "Updates mechanism is not supported for custom builds. Please download official releases from https://minio.io/#minio"
+		errMsg = "Unable to fetch the current version of Minio server."
 		return
 	}
 
@@ -198,10 +196,22 @@ func getReleaseUpdate(updateURL string, duration time.Duration) (updateMsg updat
 	}
 
 	userAgentPrefix := func() string {
+		prefix := "Minio (" + runtime.GOOS + "; " + runtime.GOARCH
+		// if its a source build.
+		if isSourceBuild() {
+			if isDocker() {
+				prefix = prefix + "; " + "docker; source) "
+			} else {
+				prefix = prefix + "; " + "source) "
+			}
+			return prefix
+		} // else { not source.
 		if isDocker() {
-			return "Minio (" + runtime.GOOS + "; " + runtime.GOARCH + "; " + "docker) "
+			prefix = prefix + "; " + "docker) "
+		} else {
+			prefix = prefix + ") "
 		}
-		return "Minio (" + runtime.GOOS + "; " + runtime.GOARCH + ") "
+		return prefix
 	}()
 
 	// Set user agent.
@@ -239,13 +249,14 @@ func getReleaseUpdate(updateURL string, duration time.Duration) (updateMsg updat
 
 	// Verify if the date is not zero.
 	if latest.IsZero() {
-		err = errors.New("date should not be zero")
+		err = errors.New("Release date cannot be zero. Please report this issue at https://github.com/minio/minio/issues")
 		return
 	}
 
 	// Is the update latest?.
 	if latest.After(current) {
 		updateMsg.Update = true
+		updateMsg.NewerThan = latest.Sub(current)
 	}
 
 	// Return update message.
@@ -254,9 +265,15 @@ func getReleaseUpdate(updateURL string, duration time.Duration) (updateMsg updat
 
 // main entry point for update command.
 func mainUpdate(ctx *cli.Context) {
-	// Error out if 'update' command is issued for development based builds.
-	if Version == "DEVELOPMENT.GOGET" {
-		fatalIf(errors.New(""), "Update mechanism is not supported for ‘go get’ based binary builds. Please download official releases from https://minio.io/#minio")
+
+	// Set global variables after parsing passed arguments
+	setGlobalsFromContext(ctx)
+
+	// Initialization routine, such as config loading, enable logging, ..
+	minioInit()
+
+	if globalQuiet {
+		return
 	}
 
 	// Check for update.
@@ -264,11 +281,7 @@ func mainUpdate(ctx *cli.Context) {
 	var errMsg string
 	var err error
 	var secs = time.Second * 3
-	if ctx.Bool("experimental") {
-		updateMsg, errMsg, err = getReleaseUpdate(minioUpdateExperimentalURL, secs)
-	} else {
-		updateMsg, errMsg, err = getReleaseUpdate(minioUpdateStableURL, secs)
-	}
+	updateMsg, errMsg, err = getReleaseUpdate(minioUpdateStableURL, secs)
 	fatalIf(err, errMsg)
 	console.Println(updateMsg)
 }

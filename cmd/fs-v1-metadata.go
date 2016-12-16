@@ -18,10 +18,7 @@ package cmd
 
 import (
 	"encoding/json"
-	"os"
-	"path"
 	"sort"
-	"strings"
 )
 
 const (
@@ -95,17 +92,17 @@ func readFSMetadata(disk StorageAPI, bucket, filePath string) (fsMeta fsMetaV1, 
 
 // Write fsMeta to fs.json or fs-append.json.
 func writeFSMetadata(disk StorageAPI, bucket, filePath string, fsMeta fsMetaV1) error {
-	tmpPath := path.Join(tmpMetaPrefix, getUUID())
+	tmpPath := mustGetUUID()
 	metadataBytes, err := json.Marshal(fsMeta)
 	if err != nil {
 		return traceError(err)
 	}
-	if err = disk.AppendFile(minioMetaBucket, tmpPath, metadataBytes); err != nil {
+	if err = disk.AppendFile(minioMetaTmpBucket, tmpPath, metadataBytes); err != nil {
 		return traceError(err)
 	}
-	err = disk.RenameFile(minioMetaBucket, tmpPath, bucket, filePath)
+	err = disk.RenameFile(minioMetaTmpBucket, tmpPath, bucket, filePath)
 	if err != nil {
-		err = disk.DeleteFile(minioMetaBucket, tmpPath)
+		err = disk.DeleteFile(minioMetaTmpBucket, tmpPath)
 		if err != nil {
 			return traceError(err)
 		}
@@ -163,33 +160,4 @@ func isPartsSame(uploadedParts []objectPartInfo, completeParts []completePart) b
 		}
 	}
 	return true
-}
-
-var extendedHeaders = []string{
-	"X-Amz-Meta-",
-	"X-Minio-Meta-",
-	// Add new extended headers.
-}
-
-// isExtendedHeader validates if input string matches extended headers.
-func isExtendedHeader(header string) bool {
-	for _, extendedHeader := range extendedHeaders {
-		if strings.HasPrefix(header, extendedHeader) {
-			return true
-		}
-	}
-	return false
-}
-
-// Return true if extended HTTP headers are set, false otherwise.
-func hasExtendedHeader(metadata map[string]string) bool {
-	if os.Getenv("MINIO_ENABLE_FSMETA") == "1" {
-		return true
-	}
-	for k := range metadata {
-		if isExtendedHeader(k) {
-			return true
-		}
-	}
-	return false
 }

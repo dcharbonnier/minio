@@ -18,8 +18,6 @@ package cmd
 
 import (
 	"bytes"
-	"crypto/md5"
-	"encoding/hex"
 	"io/ioutil"
 	"math/rand"
 	"os"
@@ -27,6 +25,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	humanize "github.com/dustin/go-humanize"
 )
 
 func TestRepeatPutObjectPart(t *testing.T) {
@@ -51,16 +51,14 @@ func TestRepeatPutObjectPart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fiveMBBytes := bytes.Repeat([]byte("a"), 5*1024*1024)
-	md5Writer := md5.New()
-	md5Writer.Write(fiveMBBytes)
-	md5Hex := hex.EncodeToString(md5Writer.Sum(nil))
-	_, err = objLayer.PutObjectPart("bucket1", "mpartObj1", uploadID, 1, 5*1024*1024, bytes.NewReader(fiveMBBytes), md5Hex, "")
+	fiveMBBytes := bytes.Repeat([]byte("a"), 5*humanize.MiByte)
+	md5Hex := getMD5Hash(fiveMBBytes)
+	_, err = objLayer.PutObjectPart("bucket1", "mpartObj1", uploadID, 1, 5*humanize.MiByte, bytes.NewReader(fiveMBBytes), md5Hex, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	// PutObjectPart should succeed even if part already exists. ref: https://github.com/minio/minio/issues/1930
-	_, err = objLayer.PutObjectPart("bucket1", "mpartObj1", uploadID, 1, 5*1024*1024, bytes.NewReader(fiveMBBytes), md5Hex, "")
+	_, err = objLayer.PutObjectPart("bucket1", "mpartObj1", uploadID, 1, 5*humanize.MiByte, bytes.NewReader(fiveMBBytes), md5Hex, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +117,7 @@ func TestXLDeleteObjectDiskNotFound(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	xl := obj.(xlObjects)
+	xl := obj.(*xlObjects)
 
 	// Create "bucket"
 	err = obj.MakeBucket("bucket")
@@ -137,7 +135,7 @@ func TestXLDeleteObjectDiskNotFound(t *testing.T) {
 	// for a 16 disk setup, quorum is 9. To simulate disks not found yet
 	// quorum is available, we remove disks leaving quorum disks behind.
 	for i := range xl.storageDisks[:7] {
-		xl.storageDisks[i] = newNaughtyDisk(xl.storageDisks[i].(*posix), nil, errFaultyDisk)
+		xl.storageDisks[i] = newNaughtyDisk(xl.storageDisks[i].(*retryStorage), nil, errFaultyDisk)
 	}
 	err = obj.DeleteObject(bucket, object)
 	if err != nil {
@@ -169,7 +167,7 @@ func TestGetObjectNoQuorum(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	xl := obj.(xlObjects)
+	xl := obj.(*xlObjects)
 
 	// Create "bucket"
 	err = obj.MakeBucket("bucket")
@@ -197,7 +195,7 @@ func TestGetObjectNoQuorum(t *testing.T) {
 		}
 		for i := range xl.storageDisks[:9] {
 			switch diskType := xl.storageDisks[i].(type) {
-			case *posix:
+			case *retryStorage:
 				xl.storageDisks[i] = newNaughtyDisk(diskType, diskErrors, errFaultyDisk)
 			case *naughtyDisk:
 				xl.storageDisks[i] = newNaughtyDisk(diskType.disk, diskErrors, errFaultyDisk)
@@ -221,7 +219,7 @@ func TestPutObjectNoQuorum(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	xl := obj.(xlObjects)
+	xl := obj.(*xlObjects)
 
 	// Create "bucket"
 	err = obj.MakeBucket("bucket")
@@ -248,7 +246,7 @@ func TestPutObjectNoQuorum(t *testing.T) {
 		}
 		for i := range xl.storageDisks[:9] {
 			switch diskType := xl.storageDisks[i].(type) {
-			case *posix:
+			case *retryStorage:
 				xl.storageDisks[i] = newNaughtyDisk(diskType, diskErrors, errFaultyDisk)
 			case *naughtyDisk:
 				xl.storageDisks[i] = newNaughtyDisk(diskType.disk, diskErrors, errFaultyDisk)
@@ -272,7 +270,7 @@ func TestHealing(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer removeRoots(fsDirs)
-	xl := obj.(xlObjects)
+	xl := obj.(*xlObjects)
 
 	// Create "bucket"
 	err = obj.MakeBucket("bucket")
@@ -283,7 +281,7 @@ func TestHealing(t *testing.T) {
 	bucket := "bucket"
 	object := "object"
 
-	data := make([]byte, 1*1024*1024)
+	data := make([]byte, 1*humanize.MiByte)
 	length := int64(len(data))
 	_, err = rand.Read(data)
 	if err != nil {

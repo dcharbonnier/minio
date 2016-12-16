@@ -17,11 +17,9 @@
 package cmd
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/minio/cli"
@@ -38,11 +36,11 @@ var (
 		cli.StringFlag{
 			Name:  "config-dir, C",
 			Value: mustGetConfigPath(),
-			Usage: "Path to configuration folder.",
+			Usage: "Path to configuration directory.",
 		},
 		cli.BoolFlag{
 			Name:  "quiet",
-			Usage: "Suppress chatty output.",
+			Usage: "Disable startup information.",
 		},
 	}
 )
@@ -114,7 +112,6 @@ func registerApp() *cli.App {
 	registerCommand(serverCmd)
 	registerCommand(versionCmd)
 	registerCommand(updateCmd)
-	registerCommand(controlCmd)
 
 	// Set up app.
 	app := cli.NewApp()
@@ -146,79 +143,79 @@ func checkMainSyntax(c *cli.Context) {
 		console.Fatalf("Unable to obtain user's home directory. \nError: %s\n", err)
 	}
 	if configPath == "" {
-		console.Fatalln("Config folder cannot be empty, please specify --config-dir <foldername>.")
+		console.Fatalln("Config directory cannot be empty, please specify --config-dir <directoryname>.")
 	}
+}
+
+// Check for updates and print a notification message
+func checkUpdate() {
+	// Do not print update messages, if quiet flag is set.
+	if !globalQuiet {
+		updateMsg, _, err := getReleaseUpdate(minioUpdateStableURL, 1*time.Second)
+		if err != nil {
+			// Ignore any errors during getReleaseUpdate(), possibly
+			// because of network errors.
+			return
+		}
+		if updateMsg.Update {
+			console.Println(updateMsg)
+		}
+	}
+}
+
+// Generic Minio initialization to create/load config, prepare loggers, etc..
+func minioInit() {
+	// Sets new config directory.
+	setGlobalConfigPath(globalConfigDir)
+
+	// Migrate any old version of config / state files to newer format.
+	migrate()
+
+	// Initialize config.
+	configCreated, err := initConfig()
+	if err != nil {
+		console.Fatalf("Unable to initialize minio config. Err: %s.\n", err)
+	}
+	if configCreated {
+		console.Println("Created minio configuration file at " + mustGetConfigPath())
+	}
+
+	// Enable all loggers by now so we can use errorIf() and fatalIf()
+	enableLoggers()
+
+	// Fetch access keys from environment variables and update the config.
+	accessKey := os.Getenv("MINIO_ACCESS_KEY")
+	secretKey := os.Getenv("MINIO_SECRET_KEY")
+	if accessKey != "" && secretKey != "" {
+		// Set new credentials.
+		serverConfig.SetCredential(credential{
+			AccessKeyID:     accessKey,
+			SecretAccessKey: secretKey,
+		})
+	}
+	if !isValidAccessKey(serverConfig.GetCredential().AccessKeyID) {
+		fatalIf(errInvalidArgument, "Invalid access key. Accept only a string starting with a alphabetic and containing from 5 to 20 characters.")
+	}
+	if !isValidSecretKey(serverConfig.GetCredential().SecretAccessKey) {
+		fatalIf(errInvalidArgument, "Invalid secret key. Accept only a string containing from 8 to 40 characters.")
+	}
+
+	// Init the error tracing module.
+	initError()
+
 }
 
 // Main main for minio server.
 func Main() {
 	app := registerApp()
 	app.Before = func(c *cli.Context) error {
-		configDir := c.GlobalString("config-dir")
-		if configDir == "" {
-			fatalIf(errors.New("Config directory is empty"), "Unable to get config file.")
-		}
-		// Sets new config folder.
-		setGlobalConfigPath(configDir)
-
 		// Valid input arguments to main.
 		checkMainSyntax(c)
-
-		// Migrate any old version of config / state files to newer format.
-		migrate()
-
-		// Initialize config.
-		configCreated, err := initConfig()
-		fatalIf(err, "Unable to initialize minio config.")
-		if configCreated {
-			console.Println("Created minio configuration file at " + mustGetConfigPath())
-		}
-
-		// Fetch access keys from environment variables and update the config.
-		accessKey := os.Getenv("MINIO_ACCESS_KEY")
-		secretKey := os.Getenv("MINIO_SECRET_KEY")
-		if accessKey != "" && secretKey != "" {
-			// Set new credentials.
-			serverConfig.SetCredential(credential{
-				AccessKeyID:     accessKey,
-				SecretAccessKey: secretKey,
-			})
-		}
-		if !isValidAccessKey.MatchString(serverConfig.GetCredential().AccessKeyID) {
-			fatalIf(errInvalidArgument, "Invalid access key. Accept only a string starting with a alphabetic and containing from 5 to 20 characters.")
-		}
-		if !isValidSecretKey.MatchString(serverConfig.GetCredential().SecretAccessKey) {
-			fatalIf(errInvalidArgument, "Invalid secret key. Accept only a string containing from 8 to 40 characters.")
-		}
-
-		// Enable all loggers by now.
-		enableLoggers()
-
-		// Init the error tracing module.
-		initError()
-
-		// Set global quiet flag.
-		globalQuiet = c.Bool("quiet") || c.GlobalBool("quiet")
-
-		// Do not print update messages, if quiet flag is set.
-		if !globalQuiet {
-			if strings.HasPrefix(ReleaseTag, "RELEASE.") && c.Args().Get(0) != "update" {
-				updateMsg, _, err := getReleaseUpdate(minioUpdateStableURL, 1*time.Second)
-				if err != nil {
-					// Ignore any errors during getReleaseUpdate(), possibly
-					// because of network errors.
-					return nil
-				}
-				if updateMsg.Update {
-					console.Println(updateMsg)
-				}
-			}
-		}
 		return nil
 	}
 
 	// Start profiler if env is set.
-	if profiler := os.Getenv("MINIO_PROFILER"); profiler != "" {
+	if profiler := os.Getenv("_MINIO_PROFILER"); profiler != "" {
 		globalProfiler = startProfiler(profiler)
 	}
 

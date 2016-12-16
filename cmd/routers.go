@@ -18,8 +18,6 @@ package cmd
 
 import (
 	"net/http"
-	"os"
-	"strings"
 
 	router "github.com/gorilla/mux"
 )
@@ -77,58 +75,62 @@ func newObjectLayer(storageDisks []StorageAPI) (ObjectLayer, error) {
 	return objAPI, nil
 }
 
-// configureServer handler returns final handler for the http server.
-func configureServerHandler(srvCmdConfig serverCmdConfig) (http.Handler, error) {
-	// Initialize router.
-	mux := router.NewRouter()
+// Composed function registering routers for only distributed XL setup.
+func registerDistXLRouters(mux *router.Router, srvCmdConfig serverCmdConfig) error {
+	// Register storage rpc router only if its a distributed setup.
+	err := registerStorageRPCRouters(mux, srvCmdConfig)
+	if err != nil {
+		return err
+	}
 
-	// Initialize distributed NS lock.
-	if srvCmdConfig.isDistXL {
-		// Register storage rpc router only if its a distributed setup.
-		err := registerStorageRPCRouters(mux, srvCmdConfig)
-		if err != nil {
-			return nil, err
-		}
-
-		// Register distributed namespace lock.
-		err = registerDistNSLockRouter(mux, srvCmdConfig)
-		if err != nil {
-			return nil, err
-		}
+	// Register distributed namespace lock.
+	err = registerDistNSLockRouter(mux, srvCmdConfig)
+	if err != nil {
+		return err
 	}
 
 	// Register S3 peer communication router.
-	err := registerS3PeerRPCRouter(mux)
+	err = registerS3PeerRPCRouter(mux)
+	if err != nil {
+		return err
+	}
+
+	// Register RPC router for web related calls.
+	return registerBrowserPeerRPCRouter(mux)
+}
+
+// configureServer handler returns final handler for the http server.
+func configureServerHandler(srvCmdConfig serverCmdConfig) (http.Handler, error) {
+	// Initialize router. `SkipClean(true)` stops gorilla/mux from
+	// normalizing URL path minio/minio#3256
+	mux := router.NewRouter().SkipClean(true)
+
+	// Initialize distributed NS lock.
+	if globalIsDistXL {
+		registerDistXLRouters(mux, srvCmdConfig)
+	}
+
+	// Add Admin RPC router
+	err := registerAdminRPCRouter(mux)
 	if err != nil {
 		return nil, err
 	}
 
-	// Register controller rpc router.
-	err = registerControlRPCRouter(mux, srvCmdConfig)
-	if err != nil {
-		return nil, err
-	}
-
-	// set environmental variable MINIO_BROWSER=off to disable minio web browser.
-	// By default minio web browser is enabled.
-	if !strings.EqualFold(os.Getenv("MINIO_BROWSER"), "off") {
-		// Register RPC router for web related calls.
-		if err = registerBrowserRPCRouter(mux); err != nil {
-			return nil, err
-		}
-
-		if err = registerWebRouter(mux); err != nil {
+	// Register web router when its enabled.
+	if globalIsBrowserEnabled {
+		if err := registerWebRouter(mux); err != nil {
 			return nil, err
 		}
 	}
+
+	// Add Admin router.
+	registerAdminRouter(mux)
 
 	// Add API router.
 	registerAPIRouter(mux)
 
 	// List of some generic handlers which are applied for all incoming requests.
 	var handlerFns = []HandlerFunc{
-		// Limits the number of concurrent http requests.
-		setRateLimitHandler,
 		// Limits all requests size to a maximum fixed limit
 		setRequestSizeLimitHandler,
 		// Adds 'crossdomain.xml' policy handler to serve legacy flash clients.
@@ -139,6 +141,8 @@ func configureServerHandler(srvCmdConfig serverCmdConfig) (http.Handler, error) 
 		setPrivateBucketHandler,
 		// Adds cache control for all browser requests.
 		setBrowserCacheControlHandler,
+		// Validates all incoming requests to have a valid date header.
+		setTimeValidityHandler,
 		// CORS setting for all browser API requests.
 		setCorsHandler,
 		// Validates all incoming URL resources, for invalid/unsupported

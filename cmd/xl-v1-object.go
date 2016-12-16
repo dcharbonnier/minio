@@ -32,6 +32,14 @@ import (
 	"github.com/minio/minio/pkg/objcache"
 )
 
+// list all errors which can be ignored in object operations.
+var objectOpIgnoredErrs = []error{
+	errDiskNotFound,
+	errDiskAccessDenied,
+	errFaultyDisk,
+	errFaultyRemoteDisk,
+}
+
 /// Object Operations
 
 // GetObject - reads an object erasured coded across multiple
@@ -42,13 +50,8 @@ import (
 // object to be read at. length indicates the total length of the
 // object requested by client.
 func (xl xlObjects) GetObject(bucket, object string, startOffset int64, length int64, writer io.Writer) error {
-	// Verify if bucket is valid.
-	if !IsValidBucketName(bucket) {
-		return traceError(BucketNameInvalid{Bucket: bucket})
-	}
-	// Verify if object is valid.
-	if !IsValidObjectName(object) {
-		return traceError(ObjectNameInvalid{Bucket: bucket, Object: object})
+	if err := checkGetObjArgs(bucket, object); err != nil {
+		return err
 	}
 	// Start offset and length cannot be negative.
 	if startOffset < 0 || length < 0 {
@@ -59,13 +62,6 @@ func (xl xlObjects) GetObject(bucket, object string, startOffset int64, length i
 		return traceError(errUnexpected)
 	}
 
-	// get a random ID for lock instrumentation.
-	opsID := getOpsID()
-
-	// Lock the object before reading.
-	nsMutex.RLock(bucket, object, opsID)
-	defer nsMutex.RUnlock(bucket, object, opsID)
-
 	// Read metadata associated with the object from all disks.
 	metaArr, errs := readAllXLMetadata(xl.storageDisks, bucket, object)
 	// Do we have read quorum?
@@ -73,11 +69,7 @@ func (xl xlObjects) GetObject(bucket, object string, startOffset int64, length i
 		return traceError(InsufficientReadQuorum{}, errs...)
 	}
 
-	if reducedErr := reduceErrs(errs, []error{
-		errDiskNotFound,
-		errFaultyDisk,
-		errDiskAccessDenied,
-	}); reducedErr != nil {
+	if reducedErr := reduceReadQuorumErrs(errs, objectOpIgnoredErrs, xl.readQuorum); reducedErr != nil {
 		return toObjectErr(reducedErr, bucket, object)
 	}
 
@@ -85,7 +77,10 @@ func (xl xlObjects) GetObject(bucket, object string, startOffset int64, length i
 	onlineDisks, modTime := listOnlineDisks(xl.storageDisks, metaArr, errs)
 
 	// Pick latest valid metadata.
-	xlMeta := pickValidXLMeta(metaArr, modTime)
+	xlMeta, err := pickValidXLMeta(metaArr, modTime)
+	if err != nil {
+		return err
+	}
 
 	// Reorder online disks based on erasure distribution order.
 	onlineDisks = getOrderedDisks(xlMeta.Erasure.Distribution, onlineDisks)
@@ -218,20 +213,10 @@ func (xl xlObjects) GetObject(bucket, object string, startOffset int64, length i
 
 // GetObjectInfo - reads object metadata and replies back ObjectInfo.
 func (xl xlObjects) GetObjectInfo(bucket, object string) (ObjectInfo, error) {
-	// Verify if bucket is valid.
-	if !IsValidBucketName(bucket) {
-		return ObjectInfo{}, BucketNameInvalid{Bucket: bucket}
-	}
-	// Verify if object is valid.
-	if !IsValidObjectName(object) {
-		return ObjectInfo{}, ObjectNameInvalid{Bucket: bucket, Object: object}
+	if err := checkGetObjArgs(bucket, object); err != nil {
+		return ObjectInfo{}, err
 	}
 
-	// get a random ID for lock instrumentation.
-	opsID := getOpsID()
-
-	nsMutex.RLock(bucket, object, opsID)
-	defer nsMutex.RUnlock(bucket, object, opsID)
 	info, err := xl.getObjectInfo(bucket, object)
 	if err != nil {
 		return ObjectInfo{}, toObjectErr(err, bucket, object)
@@ -335,12 +320,7 @@ func rename(disks []StorageAPI, srcBucket, srcEntry, dstBucket, dstEntry string,
 		undoRename(disks, srcBucket, srcEntry, dstBucket, dstEntry, isPart, errs)
 		return traceError(errXLWriteQuorum)
 	}
-	// Return on first error, also undo any partially successful rename operations.
-	return reduceErrs(errs, []error{
-		errDiskNotFound,
-		errDiskAccessDenied,
-		errFaultyDisk,
-	})
+	return reduceWriteQuorumErrs(errs, objectOpIgnoredErrs, quorum)
 }
 
 // renamePart - renames a part of the source object to the destination
@@ -366,28 +346,16 @@ func renameObject(disks []StorageAPI, srcBucket, srcObject, dstBucket, dstObject
 // writes `xl.json` which carries the necessary metadata for future
 // object operations.
 func (xl xlObjects) PutObject(bucket string, object string, size int64, data io.Reader, metadata map[string]string, sha256sum string) (objInfo ObjectInfo, err error) {
-	// Verify if bucket is valid.
-	if !IsValidBucketName(bucket) {
-		return ObjectInfo{}, traceError(BucketNameInvalid{Bucket: bucket})
-	}
-	// Verify bucket exists.
-	if !xl.isBucketExist(bucket) {
-		return ObjectInfo{}, traceError(BucketNotFound{Bucket: bucket})
-	}
-	if !IsValidObjectName(object) {
-		return ObjectInfo{}, traceError(ObjectNameInvalid{
-			Bucket: bucket,
-			Object: object,
-		})
+	if err = checkPutObjectArgs(bucket, object, xl); err != nil {
+		return ObjectInfo{}, err
 	}
 	// No metadata is set, allocate a new one.
 	if metadata == nil {
 		metadata = make(map[string]string)
 	}
 
-	uniqueID := getUUID()
-	tempErasureObj := path.Join(tmpMetaPrefix, uniqueID, "part.1")
-	minioMetaTmpBucket := path.Join(minioMetaBucket, tmpMetaPrefix)
+	uniqueID := mustGetUUID()
+	tempErasureObj := path.Join(uniqueID, "part.1")
 	tempObj := uniqueID
 
 	// Initialize md5 writer.
@@ -452,15 +420,15 @@ func (xl xlObjects) PutObject(bucket string, object string, size int64, data io.
 		for _, disk := range onlineDisks {
 			if disk != nil {
 				actualSize := xl.sizeOnDisk(size, xlMeta.Erasure.BlockSize, xlMeta.Erasure.DataBlocks)
-				disk.PrepareFile(minioMetaBucket, tempErasureObj, actualSize)
+				disk.PrepareFile(minioMetaTmpBucket, tempErasureObj, actualSize)
 			}
 		}
 	}
 
 	// Erasure code data and write across all disks.
-	sizeWritten, checkSums, err := erasureCreateFile(onlineDisks, minioMetaBucket, tempErasureObj, teeReader, xlMeta.Erasure.BlockSize, xlMeta.Erasure.DataBlocks, xlMeta.Erasure.ParityBlocks, bitRotAlgo, xl.writeQuorum)
+	sizeWritten, checkSums, err := erasureCreateFile(onlineDisks, minioMetaTmpBucket, tempErasureObj, teeReader, xlMeta.Erasure.BlockSize, xlMeta.Erasure.DataBlocks, xlMeta.Erasure.ParityBlocks, bitRotAlgo, xl.writeQuorum)
 	if err != nil {
-		return ObjectInfo{}, toObjectErr(err, minioMetaBucket, tempErasureObj)
+		return ObjectInfo{}, toObjectErr(err, minioMetaTmpBucket, tempErasureObj)
 	}
 	// Should return IncompleteBody{} error when reader has fewer bytes
 	// than specified in request header.
@@ -508,15 +476,6 @@ func (xl xlObjects) PutObject(bucket string, object string, size int64, data io.
 		}
 	}
 
-	// get a random ID for lock instrumentation.
-	// generates random string on setting MINIO_DEBUG=lock, else returns empty string.
-	// used for instrumentation on locks.
-	opsID := getOpsID()
-
-	// Lock the object.
-	nsMutex.Lock(bucket, object, opsID)
-	defer nsMutex.Unlock(bucket, object, opsID)
-
 	// Check if an object is present as one of the parent dir.
 	// -- FIXME. (needs a new kind of lock).
 	if xl.parentDirIsObject(bucket, path.Dir(object)) {
@@ -524,7 +483,7 @@ func (xl xlObjects) PutObject(bucket string, object string, size int64, data io.
 	}
 
 	// Rename if an object already exists to temporary location.
-	newUniqueID := getUUID()
+	newUniqueID := mustGetUUID()
 	if xl.isObject(bucket, object) {
 		// Delete the temporary copy of the object that existed before this PutObject request.
 		defer xl.deleteObject(minioMetaTmpBucket, newUniqueID)
@@ -629,19 +588,9 @@ func (xl xlObjects) deleteObject(bucket, object string) error {
 // any error as it is not necessary for the handler to reply back a
 // response to the client request.
 func (xl xlObjects) DeleteObject(bucket, object string) (err error) {
-	// Verify if bucket is valid.
-	if !IsValidBucketName(bucket) {
-		return traceError(BucketNameInvalid{Bucket: bucket})
+	if err = checkDelObjArgs(bucket, object); err != nil {
+		return err
 	}
-	if !IsValidObjectName(object) {
-		return traceError(ObjectNameInvalid{Bucket: bucket, Object: object})
-	}
-
-	// get a random ID for lock instrumentation.
-	opsID := getOpsID()
-
-	nsMutex.Lock(bucket, object, opsID)
-	defer nsMutex.Unlock(bucket, object, opsID)
 
 	// Validate object exists.
 	if !xl.isObject(bucket, object) {
@@ -654,8 +603,10 @@ func (xl xlObjects) DeleteObject(bucket, object string) (err error) {
 		return toObjectErr(err, bucket, object)
 	}
 
-	// Delete from the cache.
-	xl.objCache.Delete(pathJoin(bucket, object))
+	if xl.objCacheEnabled {
+		// Delete from the cache.
+		xl.objCache.Delete(pathJoin(bucket, object))
+	}
 
 	// Success.
 	return nil

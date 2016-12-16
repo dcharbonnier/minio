@@ -22,6 +22,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,6 +38,7 @@ const (
 // http://docs.aws.amazon.com/AmazonS3/latest/dev/RESTAuthentication.html#RESTAuthenticationStringToSign
 
 // Whitelist resource list that will be used in query string for signature-V2 calculation.
+// The list should be alphabetically sorted
 var resourceList = []string{
 	"acl",
 	"delete",
@@ -47,6 +49,12 @@ var resourceList = []string{
 	"partNumber",
 	"policy",
 	"requestPayment",
+	"response-cache-control",
+	"response-content-disposition",
+	"response-content-encoding",
+	"response-content-language",
+	"response-content-type",
+	"response-expires",
 	"torrent",
 	"uploadId",
 	"uploads",
@@ -92,20 +100,27 @@ func doesPresignV2SignatureMatch(r *http.Request) APIErrorCode {
 	var gotSignature string
 	var expires string
 	var accessKey string
+	var err error
 	for _, query := range queries {
 		keyval := strings.Split(query, "=")
 		switch keyval[0] {
 		case "AWSAccessKeyId":
-			accessKey = keyval[1]
+			accessKey, err = url.QueryUnescape(keyval[1])
 		case "Signature":
-			gotSignature = keyval[1]
+			gotSignature, err = url.QueryUnescape(keyval[1])
 		case "Expires":
-			expires = keyval[1]
+			expires, err = url.QueryUnescape(keyval[1])
 		default:
 			filteredQueries = append(filteredQueries, query)
 		}
 	}
+	// Check if the query unescaped properly.
+	if err != nil {
+		errorIf(err, "Unable to unescape query values", queries)
+		return ErrInvalidQueryParams
+	}
 
+	// Invalid access key.
 	if accessKey == "" {
 		return ErrInvalidQueryParams
 	}
@@ -121,12 +136,13 @@ func doesPresignV2SignatureMatch(r *http.Request) APIErrorCode {
 		return ErrMalformedExpires
 	}
 
+	// Check if the presigned URL has expired.
 	if expiresInt < time.Now().UTC().Unix() {
 		return ErrExpiredPresignRequest
 	}
 
 	expectedSignature := preSignatureV2(r.Method, encodedResource, strings.Join(filteredQueries, "&"), r.Header, expires)
-	if gotSignature != getURLEncodedName(expectedSignature) {
+	if gotSignature != expectedSignature {
 		return ErrSignatureDoesNotMatch
 	}
 
@@ -191,16 +207,19 @@ func doesSignV2Match(r *http.Request) APIErrorCode {
 		return apiError
 	}
 
-	// url.RawPath will be valid if path has any encoded characters, if not it will
-	// be empty - in which case we need to consider url.Path (bug in net/http?)
+	// Encode path:
+	//   url.RawPath will be valid if path has any encoded characters, if not it will
+	//   be empty - in which case we need to consider url.Path (bug in net/http?)
 	encodedResource := r.URL.RawPath
-	encodedQuery := r.URL.RawQuery
 	if encodedResource == "" {
 		splits := strings.Split(r.URL.Path, "?")
 		if len(splits) > 0 {
-			encodedResource = splits[0]
+			encodedResource = getURLEncodedName(splits[0])
 		}
 	}
+
+	// Encode query strings
+	encodedQuery := r.URL.Query().Encode()
 
 	expectedAuth := signatureV2(r.Method, encodedResource, encodedQuery, r.Header)
 	if v2Auth != expectedAuth {

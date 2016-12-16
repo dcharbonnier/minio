@@ -16,32 +16,9 @@
 
 package cmd
 
-import (
-	"encoding/json"
-	"time"
-)
-
-func (s3 *s3PeerAPIHandlers) LoginHandler(args *RPCLoginArgs, reply *RPCLoginReply) error {
-	jwt, err := newJWT(defaultInterNodeJWTExpiry)
-	if err != nil {
-		return err
-	}
-	if err = jwt.Authenticate(args.Username, args.Password); err != nil {
-		return err
-	}
-	token, err := jwt.GenerateToken(args.Username)
-	if err != nil {
-		return err
-	}
-	reply.Token = token
-	reply.ServerVersion = Version
-	reply.Timestamp = time.Now().UTC()
-	return nil
-}
-
-// SetBNPArgs - Arguments collection to SetBucketNotificationPeer RPC
+// SetBucketNotificationPeerArgs - Arguments collection to SetBucketNotificationPeer RPC
 // call
-type SetBNPArgs struct {
+type SetBucketNotificationPeerArgs struct {
 	// For Auth
 	GenericArgs
 
@@ -51,26 +28,24 @@ type SetBNPArgs struct {
 	NCfg *notificationConfig
 }
 
-func (s3 *s3PeerAPIHandlers) SetBucketNotificationPeer(args *SetBNPArgs, reply *GenericReply) error {
+// BucketUpdate - implements bucket notification updates,
+// the underlying operation is a network call updates all
+// the peers participating in bucket notification.
+func (s *SetBucketNotificationPeerArgs) BucketUpdate(client BucketMetaState) error {
+	return client.UpdateBucketNotification(s)
+}
+
+func (s3 *s3PeerAPIHandlers) SetBucketNotificationPeer(args *SetBucketNotificationPeerArgs, reply *GenericReply) error {
 	// check auth
 	if !isRPCTokenValid(args.Token) {
 		return errInvalidToken
 	}
 
-	// check if object layer is available.
-	objAPI := s3.ObjectAPI()
-	if objAPI == nil {
-		return errServerNotInitialized
-	}
-
-	// Update in-memory notification config.
-	globalEventNotifier.SetBucketNotificationConfig(args.Bucket, args.NCfg)
-
-	return nil
+	return s3.bms.UpdateBucketNotification(args)
 }
 
-// SetBLPArgs - Arguments collection to SetBucketListenerPeer RPC call
-type SetBLPArgs struct {
+// SetBucketListenerPeerArgs - Arguments collection to SetBucketListenerPeer RPC call
+type SetBucketListenerPeerArgs struct {
 	// For Auth
 	GenericArgs
 
@@ -80,20 +55,20 @@ type SetBLPArgs struct {
 	LCfg []listenerConfig
 }
 
-func (s3 *s3PeerAPIHandlers) SetBucketListenerPeer(args SetBLPArgs, reply *GenericReply) error {
+// BucketUpdate - implements bucket listener updates,
+// the underlying operation is a network call updates all
+// the peers participating in listen bucket notification.
+func (s *SetBucketListenerPeerArgs) BucketUpdate(client BucketMetaState) error {
+	return client.UpdateBucketListener(s)
+}
+
+func (s3 *s3PeerAPIHandlers) SetBucketListenerPeer(args *SetBucketListenerPeerArgs, reply *GenericReply) error {
 	// check auth
 	if !isRPCTokenValid(args.Token) {
 		return errInvalidToken
 	}
 
-	// check if object layer is available.
-	objAPI := s3.ObjectAPI()
-	if objAPI == nil {
-		return errServerNotInitialized
-	}
-
-	// Update in-memory notification config.
-	return globalEventNotifier.SetBucketListenerConfig(args.Bucket, args.LCfg)
+	return s3.bms.UpdateBucketListener(args)
 }
 
 // EventArgs - Arguments collection for Event RPC call
@@ -115,17 +90,11 @@ func (s3 *s3PeerAPIHandlers) Event(args *EventArgs, reply *GenericReply) error {
 		return errInvalidToken
 	}
 
-	// check if object layer is available.
-	objAPI := s3.ObjectAPI()
-	if objAPI == nil {
-		return errServerNotInitialized
-	}
-
-	return globalEventNotifier.SendListenerEvent(args.Arn, args.Event)
+	return s3.bms.SendEvent(args)
 }
 
-// SetBPPArgs - Arguments collection for SetBucketPolicyPeer RPC call
-type SetBPPArgs struct {
+// SetBucketPolicyPeerArgs - Arguments collection for SetBucketPolicyPeer RPC call
+type SetBucketPolicyPeerArgs struct {
 	// For Auth
 	GenericArgs
 
@@ -135,23 +104,19 @@ type SetBPPArgs struct {
 	PChBytes []byte
 }
 
+// BucketUpdate - implements bucket policy updates,
+// the underlying operation is a network call updates all
+// the peers participating for new set/unset policies.
+func (s *SetBucketPolicyPeerArgs) BucketUpdate(client BucketMetaState) error {
+	return client.UpdateBucketPolicy(s)
+}
+
 // tell receiving server to update a bucket policy
-func (s3 *s3PeerAPIHandlers) SetBucketPolicyPeer(args SetBPPArgs, reply *GenericReply) error {
+func (s3 *s3PeerAPIHandlers) SetBucketPolicyPeer(args *SetBucketPolicyPeerArgs, reply *GenericReply) error {
 	// check auth
 	if !isRPCTokenValid(args.Token) {
 		return errInvalidToken
 	}
 
-	// check if object layer is available.
-	objAPI := s3.ObjectAPI()
-	if objAPI == nil {
-		return errServerNotInitialized
-	}
-
-	var pCh policyChange
-	if err := json.Unmarshal(args.PChBytes, &pCh); err != nil {
-		return err
-	}
-
-	return globalBucketPolicies.SetBucketPolicy(args.Bucket, pCh)
+	return s3.bms.UpdateBucketPolicy(args)
 }

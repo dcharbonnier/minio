@@ -18,19 +18,30 @@ package cmd
 
 import (
 	"bytes"
-	"crypto/md5"
-	"encoding/hex"
 	"io/ioutil"
 	"math"
 	"math/rand"
 	"strconv"
 	"testing"
 	"time"
+
+	humanize "github.com/dustin/go-humanize"
 )
 
 // Prepare benchmark backend
 func prepareBenchmarkBackend(instanceType string) (ObjectLayer, []string, error) {
-	nDisks := 16
+	var nDisks int
+	switch instanceType {
+	// Total number of disks for FS backend is set to 1.
+	case FSTestStr:
+		nDisks = 1
+		// Total number of disks for FS backend is set to 16.
+	case XLTestStr:
+		nDisks = 16
+	default:
+		nDisks = 1
+	}
+	// get `nDisks` random disks.
 	disks, err := getRandomDisks(nDisks)
 	if err != nil {
 		return nil, nil, err
@@ -39,11 +50,11 @@ func prepareBenchmarkBackend(instanceType string) (ObjectLayer, []string, error)
 	if err != nil {
 		return nil, nil, err
 	}
-	obj, _, err := initObjectLayer(endpoints, nil)
+	// initialize object layer.
+	obj, _, err := initObjectLayer(endpoints)
 	if err != nil {
 		return nil, nil, err
 	}
-
 	return obj, disks, nil
 }
 
@@ -63,10 +74,8 @@ func runPutObjectBenchmark(b *testing.B, obj ObjectLayer, objSize int) {
 	textData := generateBytesData(objSize)
 	// generate md5sum for the generated data.
 	// md5sum of the data to written is required as input for PutObject.
-	hasher := md5.New()
-	hasher.Write([]byte(textData))
 	metadata := make(map[string]string)
-	metadata["md5Sum"] = hex.EncodeToString(hasher.Sum(nil))
+	metadata["md5Sum"] = getMD5Hash(textData)
 	sha256sum := ""
 	// benchmark utility which helps obtain number of allocations and bytes allocated per ops.
 	b.ReportAllocs()
@@ -100,7 +109,7 @@ func runPutObjectPartBenchmark(b *testing.B, obj ObjectLayer, partSize int) {
 		b.Fatal(err)
 	}
 
-	objSize := 128 * 1024 * 1024
+	objSize := 128 * humanize.MiByte
 
 	// PutObjectPart returns md5Sum of the object inserted.
 	// md5Sum variable is assigned with that value.
@@ -109,10 +118,8 @@ func runPutObjectPartBenchmark(b *testing.B, obj ObjectLayer, partSize int) {
 	textData := generateBytesData(objSize)
 	// generate md5sum for the generated data.
 	// md5sum of the data to written is required as input for NewMultipartUpload.
-	hasher := md5.New()
-	hasher.Write([]byte(textData))
 	metadata := make(map[string]string)
-	metadata["md5Sum"] = hex.EncodeToString(hasher.Sum(nil))
+	metadata["md5Sum"] = getMD5Hash(textData)
 	sha256sum := ""
 	uploadID, err = obj.NewMultipartUpload(bucket, object, metadata)
 	if err != nil {
@@ -128,15 +135,13 @@ func runPutObjectPartBenchmark(b *testing.B, obj ObjectLayer, partSize int) {
 		// insert the object.
 		totalPartsNR := int(math.Ceil(float64(objSize) / float64(partSize)))
 		for j := 0; j < totalPartsNR; j++ {
-			hasher.Reset()
 			if j < totalPartsNR-1 {
 				textPartData = textData[j*partSize : (j+1)*partSize-1]
 			} else {
 				textPartData = textData[j*partSize:]
 			}
-			hasher.Write([]byte(textPartData))
 			metadata := make(map[string]string)
-			metadata["md5Sum"] = hex.EncodeToString(hasher.Sum(nil))
+			metadata["md5Sum"] = getMD5Hash([]byte(textPartData))
 			md5Sum, err = obj.PutObjectPart(bucket, object, uploadID, j, int64(len(textPartData)), bytes.NewBuffer(textPartData), metadata["md5Sum"], sha256sum)
 			if err != nil {
 				b.Fatal(err)
@@ -231,10 +236,8 @@ func runGetObjectBenchmark(b *testing.B, obj ObjectLayer, objSize int) {
 		// generate md5sum for the generated data.
 		// md5sum of the data to written is required as input for PutObject.
 		// PutObject is the functions which writes the data onto the FS/XL backend.
-		hasher := md5.New()
-		hasher.Write([]byte(textData))
 		metadata := make(map[string]string)
-		metadata["md5Sum"] = hex.EncodeToString(hasher.Sum(nil))
+		metadata["md5Sum"] = getMD5Hash(textData)
 		// insert the object.
 		var objInfo ObjectInfo
 		objInfo, err = obj.PutObject(bucket, "object"+strconv.Itoa(i), int64(len(textData)), bytes.NewBuffer(textData), metadata, sha256sum)
@@ -338,10 +341,8 @@ func runPutObjectBenchmarkParallel(b *testing.B, obj ObjectLayer, objSize int) {
 	textData := generateBytesData(objSize)
 	// generate md5sum for the generated data.
 	// md5sum of the data to written is required as input for PutObject.
-	hasher := md5.New()
-	hasher.Write([]byte(textData))
 	metadata := make(map[string]string)
-	metadata["md5Sum"] = hex.EncodeToString(hasher.Sum(nil))
+	metadata["md5Sum"] = getMD5Hash([]byte(textData))
 	sha256sum := ""
 	// benchmark utility which helps obtain number of allocations and bytes allocated per ops.
 	b.ReportAllocs()
@@ -390,10 +391,8 @@ func runGetObjectBenchmarkParallel(b *testing.B, obj ObjectLayer, objSize int) {
 		// generate md5sum for the generated data.
 		// md5sum of the data to written is required as input for PutObject.
 		// PutObject is the functions which writes the data onto the FS/XL backend.
-		hasher := md5.New()
-		hasher.Write([]byte(textData))
 		metadata := make(map[string]string)
-		metadata["md5Sum"] = hex.EncodeToString(hasher.Sum(nil))
+		metadata["md5Sum"] = getMD5Hash([]byte(textData))
 		sha256sum := ""
 		// insert the object.
 		var objInfo ObjectInfo

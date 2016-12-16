@@ -31,7 +31,7 @@ func TestInitEventNotifierFaultyDisks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init Test config failed")
 	}
-	// remove the root folder after the test ends.
+	// remove the root directory after the test ends.
 	defer removeAll(rootPath)
 
 	disks, err := getRandomDisks(1)
@@ -43,7 +43,7 @@ func TestInitEventNotifierFaultyDisks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	obj, _, err := initObjectLayer(endpoints, nil)
+	obj, _, err := initObjectLayer(endpoints)
 	if err != nil {
 		t.Fatal("Unable to initialize FS backend.", err)
 	}
@@ -54,7 +54,7 @@ func TestInitEventNotifierFaultyDisks(t *testing.T) {
 	}
 
 	fs := obj.(fsObjects)
-	fsstorage := fs.storage.(*posix)
+	fsstorage := fs.storage.(*retryStorage)
 
 	listenARN := "arn:minio:sns:us-east-1:1:listen"
 	queueARN := "arn:minio:sqs:us-east-1:1:redis"
@@ -85,7 +85,7 @@ func TestInitEventNotifierWithAMQP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init Test config failed")
 	}
-	// remove the root folder after the test ends.
+	// remove the root directory after the test ends.
 	defer removeAll(rootPath)
 
 	disks, err := getRandomDisks(1)
@@ -97,7 +97,7 @@ func TestInitEventNotifierWithAMQP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fs, _, err := initObjectLayer(endpoints, nil)
+	fs, _, err := initObjectLayer(endpoints)
 	if err != nil {
 		t.Fatal("Unable to initialize FS backend.", err)
 	}
@@ -116,7 +116,7 @@ func TestInitEventNotifierWithElasticSearch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init Test config failed")
 	}
-	// remove the root folder after the test ends.
+	// remove the root directory after the test ends.
 	defer removeAll(rootPath)
 
 	disks, err := getRandomDisks(1)
@@ -128,7 +128,7 @@ func TestInitEventNotifierWithElasticSearch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fs, _, err := initObjectLayer(endpoints, nil)
+	fs, _, err := initObjectLayer(endpoints)
 	if err != nil {
 		t.Fatal("Unable to initialize FS backend.", err)
 	}
@@ -147,7 +147,7 @@ func TestInitEventNotifierWithRedis(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init Test config failed")
 	}
-	// remove the root folder after the test ends.
+	// remove the root directory after the test ends.
 	defer removeAll(rootPath)
 
 	disks, err := getRandomDisks(1)
@@ -159,7 +159,7 @@ func TestInitEventNotifierWithRedis(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fs, _, err := initObjectLayer(endpoints, nil)
+	fs, _, err := initObjectLayer(endpoints)
 	if err != nil {
 		t.Fatal("Unable to initialize FS backend.", err)
 	}
@@ -291,7 +291,7 @@ func TestInitEventNotifier(t *testing.T) {
 	// needed to load listener config from disk for testing (in
 	// single peer mode, the listener config is ingored, but here
 	// we want to test the loading from disk too.)
-	globalS3Peers.isDistXL = true
+	globalIsDistXL = true
 
 	// test event notifier init
 	if err := initEventNotifier(obj); err != nil {
@@ -366,7 +366,7 @@ func TestListenBucketNotification(t *testing.T) {
 	// needed to load listener config from disk for testing (in
 	// single peer mode, the listener config is ingored, but here
 	// we want to test the loading from disk too.)
-	globalS3Peers.isDistXL = true
+	globalIsDistXL = true
 
 	// Init event notifier
 	if err := initEventNotifier(obj); err != nil {

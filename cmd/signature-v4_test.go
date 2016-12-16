@@ -100,11 +100,19 @@ func TestDoesPolicySignatureMatch(t *testing.T) {
 }
 
 func TestDoesPresignedSignatureMatch(t *testing.T) {
+	rootPath, err := newTestConfig("us-east-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer removeAll(rootPath)
+
 	// sha256 hash of "payload"
-	payload := "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5"
+	payloadSHA256 := "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5"
 	now := time.Now().UTC()
 	credentialTemplate := "%s/%s/%s/s3/aws4_request"
 
+	region := serverConfig.GetRegion()
+	accessKeyID := serverConfig.GetCredential().AccessKeyID
 	testCases := []struct {
 		queryParams map[string]string
 		headers     map[string]string
@@ -137,7 +145,7 @@ func TestDoesPresignedSignatureMatch(t *testing.T) {
 				"X-Amz-Expires":        "60",
 				"X-Amz-Signature":      "badsignature",
 				"X-Amz-SignedHeaders":  "host;x-amz-content-sha256;x-amz-date",
-				"X-Amz-Credential":     fmt.Sprintf(credentialTemplate, serverConfig.GetCredential().AccessKeyID, now.Format(yyyymmdd), "us-west-1"),
+				"X-Amz-Credential":     fmt.Sprintf(credentialTemplate, accessKeyID, now.Format(yyyymmdd), "us-west-1"),
 				"X-Amz-Content-Sha256": "ThisIsNotThePayloadHash",
 			},
 			region:   "us-west-1",
@@ -151,8 +159,8 @@ func TestDoesPresignedSignatureMatch(t *testing.T) {
 				"X-Amz-Expires":        "60",
 				"X-Amz-Signature":      "badsignature",
 				"X-Amz-SignedHeaders":  "host;x-amz-content-sha256;x-amz-date",
-				"X-Amz-Credential":     fmt.Sprintf(credentialTemplate, serverConfig.GetCredential().AccessKeyID, now.Format(yyyymmdd), "us-west-1"),
-				"X-Amz-Content-Sha256": payload,
+				"X-Amz-Credential":     fmt.Sprintf(credentialTemplate, accessKeyID, now.Format(yyyymmdd), "us-west-1"),
+				"X-Amz-Content-Sha256": payloadSHA256,
 			},
 			region:   "us-east-1",
 			expected: ErrInvalidRegion,
@@ -165,8 +173,8 @@ func TestDoesPresignedSignatureMatch(t *testing.T) {
 				"X-Amz-Expires":        "60",
 				"X-Amz-Signature":      "badsignature",
 				"X-Amz-SignedHeaders":  "host;x-amz-content-sha256;x-amz-date",
-				"X-Amz-Credential":     fmt.Sprintf(credentialTemplate, serverConfig.GetCredential().AccessKeyID, now.Format(yyyymmdd), "us-west-1"),
-				"X-Amz-Content-Sha256": payload,
+				"X-Amz-Credential":     fmt.Sprintf(credentialTemplate, accessKeyID, now.Format(yyyymmdd), "us-west-1"),
+				"X-Amz-Content-Sha256": payloadSHA256,
 			},
 			region:   "us-west-1",
 			expected: ErrUnsignedHeaders,
@@ -179,10 +187,10 @@ func TestDoesPresignedSignatureMatch(t *testing.T) {
 				"X-Amz-Expires":        "60",
 				"X-Amz-Signature":      "badsignature",
 				"X-Amz-SignedHeaders":  "x-amz-content-sha256;x-amz-date",
-				"X-Amz-Credential":     fmt.Sprintf(credentialTemplate, serverConfig.GetCredential().AccessKeyID, now.Format(yyyymmdd), serverConfig.GetRegion()),
-				"X-Amz-Content-Sha256": payload,
+				"X-Amz-Credential":     fmt.Sprintf(credentialTemplate, accessKeyID, now.Format(yyyymmdd), region),
+				"X-Amz-Content-Sha256": payloadSHA256,
 			},
-			region:   serverConfig.GetRegion(),
+			region:   region,
 			expected: ErrUnsignedHeaders,
 		},
 		// (6) Should give an expired request if it has expired.
@@ -193,14 +201,14 @@ func TestDoesPresignedSignatureMatch(t *testing.T) {
 				"X-Amz-Expires":        "60",
 				"X-Amz-Signature":      "badsignature",
 				"X-Amz-SignedHeaders":  "host;x-amz-content-sha256;x-amz-date",
-				"X-Amz-Credential":     fmt.Sprintf(credentialTemplate, serverConfig.GetCredential().AccessKeyID, now.Format(yyyymmdd), serverConfig.GetRegion()),
-				"X-Amz-Content-Sha256": payload,
+				"X-Amz-Credential":     fmt.Sprintf(credentialTemplate, accessKeyID, now.Format(yyyymmdd), region),
+				"X-Amz-Content-Sha256": payloadSHA256,
 			},
 			headers: map[string]string{
 				"X-Amz-Date":           now.AddDate(0, 0, -2).Format(iso8601Format),
-				"X-Amz-Content-Sha256": payload,
+				"X-Amz-Content-Sha256": payloadSHA256,
 			},
-			region:   serverConfig.GetRegion(),
+			region:   region,
 			expected: ErrExpiredPresignRequest,
 		},
 		// (7) Should error if the signature is incorrect.
@@ -211,15 +219,90 @@ func TestDoesPresignedSignatureMatch(t *testing.T) {
 				"X-Amz-Expires":        "60",
 				"X-Amz-Signature":      "badsignature",
 				"X-Amz-SignedHeaders":  "host;x-amz-content-sha256;x-amz-date",
-				"X-Amz-Credential":     fmt.Sprintf(credentialTemplate, serverConfig.GetCredential().AccessKeyID, now.Format(yyyymmdd), serverConfig.GetRegion()),
-				"X-Amz-Content-Sha256": payload,
+				"X-Amz-Credential":     fmt.Sprintf(credentialTemplate, accessKeyID, now.Format(yyyymmdd), region),
+				"X-Amz-Content-Sha256": payloadSHA256,
 			},
 			headers: map[string]string{
 				"X-Amz-Date":           now.Format(iso8601Format),
-				"X-Amz-Content-Sha256": payload,
+				"X-Amz-Content-Sha256": payloadSHA256,
 			},
-			region:   serverConfig.GetRegion(),
+			region:   region,
 			expected: ErrSignatureDoesNotMatch,
+		},
+		// (8) Should error if the request is not ready yet, ie X-Amz-Date is in the future.
+		{
+			queryParams: map[string]string{
+				"X-Amz-Algorithm":      signV4Algorithm,
+				"X-Amz-Date":           now.Add(1 * time.Hour).Format(iso8601Format),
+				"X-Amz-Expires":        "60",
+				"X-Amz-Signature":      "badsignature",
+				"X-Amz-SignedHeaders":  "host;x-amz-content-sha256;x-amz-date",
+				"X-Amz-Credential":     fmt.Sprintf(credentialTemplate, accessKeyID, now.Format(yyyymmdd), region),
+				"X-Amz-Content-Sha256": payloadSHA256,
+			},
+			headers: map[string]string{
+				"X-Amz-Date":           now.Format(iso8601Format),
+				"X-Amz-Content-Sha256": payloadSHA256,
+			},
+			region:   region,
+			expected: ErrRequestNotReadyYet,
+		},
+		// (9) Should not error with invalid region instead, call should proceed
+		// with sigature does not match.
+		{
+			queryParams: map[string]string{
+				"X-Amz-Algorithm":      signV4Algorithm,
+				"X-Amz-Date":           now.Format(iso8601Format),
+				"X-Amz-Expires":        "60",
+				"X-Amz-Signature":      "badsignature",
+				"X-Amz-SignedHeaders":  "host;x-amz-content-sha256;x-amz-date",
+				"X-Amz-Credential":     fmt.Sprintf(credentialTemplate, accessKeyID, now.Format(yyyymmdd), region),
+				"X-Amz-Content-Sha256": payloadSHA256,
+			},
+			headers: map[string]string{
+				"X-Amz-Date":           now.Format(iso8601Format),
+				"X-Amz-Content-Sha256": payloadSHA256,
+			},
+			region:   "",
+			expected: ErrSignatureDoesNotMatch,
+		},
+		// (10) Should error with signature does not match. But handles
+		// query params which do not precede with "x-amz-" header.
+		{
+			queryParams: map[string]string{
+				"X-Amz-Algorithm":       signV4Algorithm,
+				"X-Amz-Date":            now.Format(iso8601Format),
+				"X-Amz-Expires":         "60",
+				"X-Amz-Signature":       "badsignature",
+				"X-Amz-SignedHeaders":   "host;x-amz-content-sha256;x-amz-date",
+				"X-Amz-Credential":      fmt.Sprintf(credentialTemplate, accessKeyID, now.Format(yyyymmdd), region),
+				"X-Amz-Content-Sha256":  payloadSHA256,
+				"response-content-type": "application/json",
+			},
+			headers: map[string]string{
+				"X-Amz-Date":           now.Format(iso8601Format),
+				"X-Amz-Content-Sha256": payloadSHA256,
+			},
+			region:   "",
+			expected: ErrSignatureDoesNotMatch,
+		},
+		// (11) Should error with unsigned headers.
+		{
+			queryParams: map[string]string{
+				"X-Amz-Algorithm":       signV4Algorithm,
+				"X-Amz-Date":            now.Format(iso8601Format),
+				"X-Amz-Expires":         "60",
+				"X-Amz-Signature":       "badsignature",
+				"X-Amz-SignedHeaders":   "host;x-amz-content-sha256;x-amz-date",
+				"X-Amz-Credential":      fmt.Sprintf(credentialTemplate, accessKeyID, now.Format(yyyymmdd), region),
+				"X-Amz-Content-Sha256":  payloadSHA256,
+				"response-content-type": "application/json",
+			},
+			headers: map[string]string{
+				"X-Amz-Date": now.Format(iso8601Format),
+			},
+			region:   "",
+			expected: ErrUnsignedHeaders,
 		},
 	}
 
@@ -243,7 +326,7 @@ func TestDoesPresignedSignatureMatch(t *testing.T) {
 		}
 
 		// Check if it matches!
-		err := doesPresignedSignatureMatch(payload, req, testCase.region)
+		err := doesPresignedSignatureMatch(payloadSHA256, req, testCase.region)
 		if err != testCase.expected {
 			t.Errorf("(%d) expected to get %s, instead got %s", i, niceError(testCase.expected), niceError(err))
 		}

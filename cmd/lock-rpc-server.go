@@ -69,6 +69,7 @@ func isWriteLock(lri []lockRequesterInfo) bool {
 
 // lockServer is type for RPC handlers
 type lockServer struct {
+	loginServer
 	rpcPath string
 	mutex   sync.Mutex
 	lockMap map[string][]lockRequesterInfo
@@ -83,11 +84,6 @@ func registerDistNSLockRouter(mux *router.Router, serverConfig serverCmdConfig) 
 // Create one lock server for every local storage rpc server.
 func newLockServers(srvConfig serverCmdConfig) (lockServers []*lockServer) {
 	for _, ep := range srvConfig.endpoints {
-		if containsEndpoint(srvConfig.ignoredEndpoints, ep) {
-			// Skip initializing ignored endpoint.
-			continue
-		}
-
 		// Not local storage move to the next node.
 		if !isLocalStorage(ep) {
 			continue
@@ -129,25 +125,6 @@ func registerStorageLockers(mux *router.Router, lockServers []*lockServer) error
 }
 
 ///  Distributed lock handlers
-
-// LoginHandler - handles LoginHandler RPC call.
-func (l *lockServer) LoginHandler(args *RPCLoginArgs, reply *RPCLoginReply) error {
-	jwt, err := newJWT(defaultInterNodeJWTExpiry)
-	if err != nil {
-		return err
-	}
-	if err = jwt.Authenticate(args.Username, args.Password); err != nil {
-		return err
-	}
-	token, err := jwt.GenerateToken(args.Username)
-	if err != nil {
-		return err
-	}
-	reply.Token = token
-	reply.Timestamp = time.Now().UTC()
-	reply.ServerVersion = Version
-	return nil
-}
 
 // Lock - rpc handler for (single) write lock operation.
 func (l *lockServer) Lock(args *LockArgs, reply *bool) error {

@@ -549,7 +549,7 @@ var errorCodeResponse = map[APIErrorCode]APIError{
 	},
 	ErrPolicyNesting: {
 		Code:           "XMinioPolicyNesting",
-		Description:    "Policy nesting conflict has occurred.",
+		Description:    "New bucket policy conflicts with an existing policy. Please try again with new prefix.",
 		HTTPStatusCode: http.StatusConflict,
 	},
 	ErrInvalidObjectName: {
@@ -572,6 +572,7 @@ func toAPIErrorCode(err error) (apiErr APIErrorCode) {
 	if err == nil {
 		return ErrNone
 	}
+
 	err = errorCause(err)
 	// Verify if the underlying error is signature mismatch.
 	switch err {
@@ -580,10 +581,12 @@ func toAPIErrorCode(err error) (apiErr APIErrorCode) {
 	case errContentSHA256Mismatch:
 		apiErr = ErrContentSHA256Mismatch
 	}
+
 	if apiErr != ErrNone {
 		// If there was a match in the above switch case.
 		return apiErr
 	}
+
 	switch err.(type) {
 	case StorageFull:
 		apiErr = ErrStorageFull
@@ -629,9 +632,12 @@ func toAPIErrorCode(err error) (apiErr APIErrorCode) {
 		apiErr = ErrContentSHA256Mismatch
 	case ObjectTooLarge:
 		apiErr = ErrEntityTooLarge
+	case ObjectTooSmall:
+		apiErr = ErrEntityTooSmall
 	default:
 		apiErr = ErrInternalError
 	}
+
 	return apiErr
 }
 

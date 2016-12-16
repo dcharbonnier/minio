@@ -18,7 +18,7 @@ package cmd
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"path"
 	"sort"
 	"sync"
@@ -195,26 +195,18 @@ func (m xlMetaV1) ObjectToPartOffset(offset int64) (partIndex int, partOffset in
 // pickValidXLMeta - picks one valid xlMeta content and returns from a
 // slice of xlmeta content. If no value is found this function panics
 // and dies.
-func pickValidXLMeta(metaArr []xlMetaV1, modTime time.Time) xlMetaV1 {
+func pickValidXLMeta(metaArr []xlMetaV1, modTime time.Time) (xlMetaV1, error) {
 	// Pick latest valid metadata.
 	for _, meta := range metaArr {
 		if meta.IsValid() && meta.Stat.ModTime.Equal(modTime) {
-			return meta
+			return meta, nil
 		}
 	}
-	pmsg := fmt.Sprintf("Unable to look for valid XL metadata content - %v %s", metaArr, modTime)
-	panic(pmsg)
+	return xlMetaV1{}, traceError(errors.New("No valid xl.json present"))
 }
 
 // list of all errors that can be ignored in a metadata operation.
-var objMetadataOpIgnoredErrs = []error{
-	errDiskNotFound,
-	errDiskAccessDenied,
-	errFaultyDisk,
-	errVolumeNotFound,
-	errFileAccessDenied,
-	errFileNotFound,
-}
+var objMetadataOpIgnoredErrs = append(baseIgnoredErrs, errDiskAccessDenied, errVolumeNotFound, errFileNotFound, errFileAccessDenied)
 
 // readXLMetaParts - returns the XL Metadata Parts from xl.json of one of the disks picked at random.
 func (xl xlObjects) readXLMetaParts(bucket, object string) (xlMetaParts []objectPartInfo, err error) {
@@ -228,7 +220,7 @@ func (xl xlObjects) readXLMetaParts(bucket, object string) (xlMetaParts []object
 		}
 		// For any reason disk or bucket is not available continue
 		// and read from other disks.
-		if isErrIgnored(err, objMetadataOpIgnoredErrs) {
+		if isErrIgnored(err, objMetadataOpIgnoredErrs...) {
 			continue
 		}
 		break
@@ -250,7 +242,7 @@ func (xl xlObjects) readXLMetaStat(bucket, object string) (xlStat statInfo, xlMe
 		}
 		// For any reason disk or bucket is not available continue
 		// and read from other disks.
-		if isErrIgnored(err, objMetadataOpIgnoredErrs) {
+		if isErrIgnored(err, objMetadataOpIgnoredErrs...) {
 			continue
 		}
 		break
@@ -335,12 +327,7 @@ func writeUniqueXLMetadata(disks []StorageAPI, bucket, prefix string, xlMetas []
 		deleteAllXLMetadata(disks, bucket, prefix, mErrs)
 		return traceError(errXLWriteQuorum)
 	}
-
-	return reduceErrs(mErrs, []error{
-		errDiskNotFound,
-		errFaultyDisk,
-		errDiskAccessDenied,
-	})
+	return reduceWriteQuorumErrs(mErrs, objectOpIgnoredErrs, quorum)
 }
 
 // writeSameXLMetadata - write `xl.json` on all disks in order.
@@ -379,10 +366,5 @@ func writeSameXLMetadata(disks []StorageAPI, bucket, prefix string, xlMeta xlMet
 		deleteAllXLMetadata(disks, bucket, prefix, mErrs)
 		return traceError(errXLWriteQuorum)
 	}
-
-	return reduceErrs(mErrs, []error{
-		errDiskNotFound,
-		errFaultyDisk,
-		errDiskAccessDenied,
-	})
+	return reduceWriteQuorumErrs(mErrs, objectOpIgnoredErrs, writeQuorum)
 }

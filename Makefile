@@ -61,11 +61,11 @@ checks:
 	@(env bash $(PWD)/buildscripts/checkgopath.sh)
 
 getdeps: checks
-	@go get -u github.com/golang/lint/golint && echo "Installed golint:"
-	@go get -u github.com/fzipp/gocyclo && echo "Installed gocyclo:"
-	@go get -u github.com/remyoudompheng/go-misc/deadcode && echo "Installed deadcode:"
-	@go get -u github.com/client9/misspell/cmd/misspell && echo "Installed misspell:"
-	@go get -u github.com/gordonklaus/ineffassign && echo "Installed ineffassign:"
+	@echo "Installing golint:" && go get -u github.com/golang/lint/golint
+	@echo "Installing gocyclo:" && go get -u github.com/fzipp/gocyclo
+	@echo "Installing deadcode:" && go get -u github.com/remyoudompheng/go-misc/deadcode
+	@echo "Installing misspell:" && go get -u github.com/client9/misspell/cmd/misspell
+	@echo "Installing ineffassign:" && go get -u github.com/gordonklaus/ineffassign
 
 verifiers: vet fmt lint cyclo spelling
 
@@ -83,8 +83,8 @@ fmt:
 
 lint:
 	@echo "Running $@:"
-	@GO15VENDOREXPERIMENT=1 ${GOPATH}/bin/golint github.com/minio/minio/cmd...
-	@GO15VENDOREXPERIMENT=1 ${GOPATH}/bin/golint github.com/minio/minio/pkg...
+	@GO15VENDOREXPERIMENT=1 ${GOPATH}/bin/golint -set_exit_status github.com/minio/minio/cmd...
+	@GO15VENDOREXPERIMENT=1 ${GOPATH}/bin/golint -set_exit_status github.com/minio/minio/pkg...
 
 ineffassign:
 	@echo "Running $@:"
@@ -92,8 +92,8 @@ ineffassign:
 
 cyclo:
 	@echo "Running $@:"
-	@GO15VENDOREXPERIMENT=1 ${GOPATH}/bin/gocyclo -over 65 cmd
-	@GO15VENDOREXPERIMENT=1 ${GOPATH}/bin/gocyclo -over 65 pkg
+	@GO15VENDOREXPERIMENT=1 ${GOPATH}/bin/gocyclo -over 100 cmd
+	@GO15VENDOREXPERIMENT=1 ${GOPATH}/bin/gocyclo -over 100 pkg
 
 build: getdeps verifiers $(UI_ASSETS)
 
@@ -101,8 +101,9 @@ deadcode:
 	@GO15VENDOREXPERIMENT=1 ${GOPATH}/bin/deadcode
 
 spelling:
-	@GO15VENDOREXPERIMENT=1 ${GOPATH}/bin/misspell -error cmd/**/*
-	@GO15VENDOREXPERIMENT=1 ${GOPATH}/bin/misspell -error pkg/**/*
+	@-GO15VENDOREXPERIMENT=1 ${GOPATH}/bin/misspell -error `find cmd/`
+	@-GO15VENDOREXPERIMENT=1 ${GOPATH}/bin/misspell -error `find pkg/`
+	@-GO15VENDOREXPERIMENT=1 ${GOPATH}/bin/misspell -error `find docs/`
 
 test: build
 	@echo "Running all minio testing:"

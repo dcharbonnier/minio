@@ -68,7 +68,7 @@ func getCanonicalHeaders(signedHeaders http.Header, host string) string {
 				if idx > 0 {
 					buf.WriteByte(',')
 				}
-				buf.WriteString(v)
+				buf.WriteString(signV4TrimAll(v))
 			}
 			buf.WriteByte('\n')
 		}
@@ -250,7 +250,9 @@ func doesPresignedSignatureMatch(hashedPayload string, r *http.Request, region s
 
 	query.Set("X-Amz-Algorithm", signV4Algorithm)
 
-	if pSignValues.Date.After(time.Now().UTC()) {
+	// If the host which signed the request is slightly ahead in time (by less than globalMaxSkewTime) the
+	// request should still be allowed.
+	if pSignValues.Date.After(time.Now().UTC().Add(globalMaxSkewTime)) {
 		return ErrRequestNotReadyYet
 	}
 

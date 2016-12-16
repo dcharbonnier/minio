@@ -17,10 +17,15 @@
 package cmd
 
 import (
-	"path"
 	"sort"
 	"sync"
 )
+
+// list all errors that can be ignore in a bucket operation.
+var bucketOpIgnoredErrs = append(baseIgnoredErrs, errDiskAccessDenied)
+
+// list all errors that can be ignored in a bucket metadata operation.
+var bucketMetadataOpIgnoredErrs = append(bucketOpIgnoredErrs, errVolumeNotFound)
 
 /// Bucket operations
 
@@ -30,12 +35,6 @@ func (xl xlObjects) MakeBucket(bucket string) error {
 	if !IsValidBucketName(bucket) {
 		return traceError(BucketNameInvalid{Bucket: bucket})
 	}
-
-	// get a random ID for lock instrumentation.
-	opsID := getOpsID()
-
-	nsMutex.Lock(bucket, "", opsID)
-	defer nsMutex.Unlock(bucket, "", opsID)
 
 	// Initialize sync waitgroup.
 	var wg = &sync.WaitGroup{}
@@ -66,16 +65,12 @@ func (xl xlObjects) MakeBucket(bucket string) error {
 	// Do we have write quorum?.
 	if !isDiskQuorum(dErrs, xl.writeQuorum) {
 		// Purge successfully created buckets if we don't have writeQuorum.
-		xl.undoMakeBucket(bucket)
+		undoMakeBucket(xl.storageDisks, bucket)
 		return toObjectErr(traceError(errXLWriteQuorum), bucket)
 	}
 
 	// Verify we have any other errors which should undo make bucket.
-	if reducedErr := reduceErrs(dErrs, []error{
-		errDiskNotFound,
-		errFaultyDisk,
-		errDiskAccessDenied,
-	}); reducedErr != nil {
+	if reducedErr := reduceWriteQuorumErrs(dErrs, bucketOpIgnoredErrs, xl.writeQuorum); reducedErr != nil {
 		return toObjectErr(reducedErr, bucket)
 	}
 	return nil
@@ -102,11 +97,11 @@ func (xl xlObjects) undoDeleteBucket(bucket string) {
 }
 
 // undo make bucket operation upon quorum failure.
-func (xl xlObjects) undoMakeBucket(bucket string) {
+func undoMakeBucket(storageDisks []StorageAPI, bucket string) {
 	// Initialize sync waitgroup.
 	var wg = &sync.WaitGroup{}
 	// Undo previous make bucket entry on all underlying storage disks.
-	for index, disk := range xl.storageDisks {
+	for index, disk := range storageDisks {
 		if disk == nil {
 			continue
 		}
@@ -120,14 +115,6 @@ func (xl xlObjects) undoMakeBucket(bucket string) {
 
 	// Wait for all make vol to finish.
 	wg.Wait()
-}
-
-// list all errors that can be ignored in a bucket metadata operation.
-var bucketMetadataOpIgnoredErrs = []error{
-	errDiskNotFound,
-	errDiskAccessDenied,
-	errFaultyDisk,
-	errVolumeNotFound,
 }
 
 // getBucketInfo - returns the BucketInfo from one of the load balanced disks.
@@ -147,25 +134,12 @@ func (xl xlObjects) getBucketInfo(bucketName string) (bucketInfo BucketInfo, err
 		}
 		err = traceError(err)
 		// For any reason disk went offline continue and pick the next one.
-		if isErrIgnored(err, bucketMetadataOpIgnoredErrs) {
+		if isErrIgnored(err, bucketMetadataOpIgnoredErrs...) {
 			continue
 		}
 		break
 	}
 	return BucketInfo{}, err
-}
-
-// Checks whether bucket exists.
-func (xl xlObjects) isBucketExist(bucket string) bool {
-	// Check whether bucket exists.
-	_, err := xl.getBucketInfo(bucket)
-	if err != nil {
-		if err == errVolumeNotFound {
-			return false
-		}
-		return false
-	}
-	return true
 }
 
 // GetBucketInfo - returns BucketInfo for a bucket.
@@ -174,11 +148,7 @@ func (xl xlObjects) GetBucketInfo(bucket string) (BucketInfo, error) {
 	if !IsValidBucketName(bucket) {
 		return BucketInfo{}, BucketNameInvalid{Bucket: bucket}
 	}
-	// get a random ID for lock instrumentation.
-	opsID := getOpsID()
 
-	nsMutex.RLock(bucket, "", opsID)
-	defer nsMutex.RUnlock(bucket, "", opsID)
 	bucketInfo, err := xl.getBucketInfo(bucket)
 	if err != nil {
 		return BucketInfo{}, toObjectErr(err, bucket)
@@ -216,14 +186,14 @@ func (xl xlObjects) listBuckets() (bucketsInfo []BucketInfo, err error) {
 				})
 			}
 			// For buckets info empty, loop once again to check
-			// if we have, can happen if disks are down.
+			// if we have, can happen if disks were down.
 			if len(bucketsInfo) == 0 {
 				continue
 			}
 			return bucketsInfo, nil
 		}
 		// Ignore any disks not found.
-		if isErrIgnored(err, bucketMetadataOpIgnoredErrs) {
+		if isErrIgnored(err, bucketMetadataOpIgnoredErrs...) {
 			continue
 		}
 		break
@@ -249,12 +219,6 @@ func (xl xlObjects) DeleteBucket(bucket string) error {
 		return BucketNameInvalid{Bucket: bucket}
 	}
 
-	// get a random ID for lock instrumentation.
-	opsID := getOpsID()
-
-	nsMutex.Lock(bucket, "", opsID)
-	defer nsMutex.Unlock(bucket, "", opsID)
-
 	// Collect if all disks report volume not found.
 	var wg = &sync.WaitGroup{}
 	var dErrs = make([]error, len(xl.storageDisks))
@@ -276,7 +240,7 @@ func (xl xlObjects) DeleteBucket(bucket string) error {
 				return
 			}
 			// Cleanup all the previously incomplete multiparts.
-			err = cleanupDir(disk, path.Join(minioMetaBucket, mpartMetaPrefix), bucket)
+			err = cleanupDir(disk, minioMetaMultipartBucket, bucket)
 			if err != nil {
 				if errorCause(err) == errVolumeNotFound {
 					return
@@ -294,11 +258,7 @@ func (xl xlObjects) DeleteBucket(bucket string) error {
 		return toObjectErr(traceError(errXLWriteQuorum), bucket)
 	}
 
-	if reducedErr := reduceErrs(dErrs, []error{
-		errFaultyDisk,
-		errDiskNotFound,
-		errDiskAccessDenied,
-	}); reducedErr != nil {
+	if reducedErr := reduceWriteQuorumErrs(dErrs, bucketOpIgnoredErrs, xl.writeQuorum); reducedErr != nil {
 		return toObjectErr(reducedErr, bucket)
 	}
 

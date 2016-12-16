@@ -19,14 +19,13 @@ package cmd
 import (
 	"path"
 	"sync"
+	"time"
 )
 
-// writeUploadJSON - create `uploads.json` or update it with change
-// described in uCh.
-func (xl xlObjects) updateUploadJSON(bucket, object string, uCh uploadIDChange) error {
-	uploadsPath := path.Join(mpartMetaPrefix, bucket, object, uploadsJSONFile)
-	uniqueID := getUUID()
-	tmpUploadsPath := path.Join(tmpMetaPrefix, uniqueID)
+// updateUploadJSON - add or remove upload ID info in all `uploads.json`.
+func (xl xlObjects) updateUploadJSON(bucket, object, uploadID string, initiated time.Time, isRemove bool) error {
+	uploadsPath := path.Join(bucket, object, uploadsJSONFile)
+	tmpUploadsPath := mustGetUUID()
 
 	// slice to store errors from disks
 	errs := make([]error, len(xl.storageDisks))
@@ -54,16 +53,16 @@ func (xl xlObjects) updateUploadJSON(bucket, object string, uCh uploadIDChange) 
 			// If we have a read error, we store error and
 			// exit.
 			if err != nil {
-				errs[index] = traceError(err)
+				errs[index] = err
 				return
 			}
 
-			if !uCh.isRemove {
+			if !isRemove {
 				// Add the uploadID
-				uploadsJSON.AddUploadID(uCh.uploadID, uCh.initiated)
+				uploadsJSON.AddUploadID(uploadID, initiated)
 			} else {
 				// Remove the upload ID
-				uploadsJSON.RemoveUploadID(uCh.uploadID)
+				uploadsJSON.RemoveUploadID(uploadID)
 				if len(uploadsJSON.Uploads) == 0 {
 					isDelete[index] = true
 				}
@@ -75,7 +74,7 @@ func (xl xlObjects) updateUploadJSON(bucket, object string, uCh uploadIDChange) 
 			if !isDelete[index] {
 				errs[index] = writeUploadJSON(&uploadsJSON, uploadsPath, tmpUploadsPath, disk)
 			} else {
-				wErr := disk.RenameFile(minioMetaBucket, uploadsPath, minioMetaBucket, tmpUploadsPath)
+				wErr := disk.RenameFile(minioMetaMultipartBucket, uploadsPath, minioMetaTmpBucket, tmpUploadsPath)
 				if wErr != nil {
 					errs[index] = traceError(wErr)
 				}
@@ -110,13 +109,13 @@ func (xl xlObjects) updateUploadJSON(bucket, object string, uCh uploadIDChange) 
 				defer wg.Done()
 				if !isDelete[index] {
 					_ = disk.DeleteFile(
-						minioMetaBucket,
+						minioMetaMultipartBucket,
 						uploadsPath,
 					)
 				} else {
 					_ = disk.RenameFile(
-						minioMetaBucket, tmpUploadsPath,
-						minioMetaBucket, uploadsPath,
+						minioMetaTmpBucket, tmpUploadsPath,
+						minioMetaMultipartBucket, uploadsPath,
 					)
 				}
 			}(index, disk)
@@ -135,18 +134,25 @@ func (xl xlObjects) updateUploadJSON(bucket, object string, uCh uploadIDChange) 
 		go func(index int, disk StorageAPI) {
 			defer wg.Done()
 			// isDelete[index] = true at this point.
-			_ = disk.DeleteFile(minioMetaBucket, tmpUploadsPath)
+			_ = disk.DeleteFile(minioMetaTmpBucket, tmpUploadsPath)
 		}(index, disk)
 	}
 	wg.Wait()
 
-	// Ignored errors list.
-	ignoredErrs := []error{
-		errDiskNotFound,
-		errFaultyDisk,
-		errDiskAccessDenied,
+	if reducedErr := reduceWriteQuorumErrs(errs, objectOpIgnoredErrs, xl.writeQuorum); reducedErr != nil {
+		return reducedErr
 	}
-	return reduceErrs(errs, ignoredErrs)
+	return nil
+}
+
+// addUploadID - add upload ID and its initiated time to 'uploads.json'.
+func (xl xlObjects) addUploadID(bucket, object string, uploadID string, initiated time.Time) error {
+	return xl.updateUploadJSON(bucket, object, uploadID, initiated, false)
+}
+
+// removeUploadID - remove upload ID in 'uploads.json'.
+func (xl xlObjects) removeUploadID(bucket, object string, uploadID string) error {
+	return xl.updateUploadJSON(bucket, object, uploadID, time.Time{}, true)
 }
 
 // Returns if the prefix is a multipart upload.
@@ -160,7 +166,7 @@ func (xl xlObjects) isMultipartUpload(bucket, prefix string) bool {
 			return true
 		}
 		// For any reason disk was deleted or goes offline, continue
-		if isErrIgnored(err, objMetadataOpIgnoredErrs) {
+		if isErrIgnored(err, objMetadataOpIgnoredErrs...) {
 			continue
 		}
 		break
@@ -170,13 +176,13 @@ func (xl xlObjects) isMultipartUpload(bucket, prefix string) bool {
 
 // isUploadIDExists - verify if a given uploadID exists and is valid.
 func (xl xlObjects) isUploadIDExists(bucket, object, uploadID string) bool {
-	uploadIDPath := path.Join(mpartMetaPrefix, bucket, object, uploadID)
-	return xl.isObject(minioMetaBucket, uploadIDPath)
+	uploadIDPath := path.Join(bucket, object, uploadID)
+	return xl.isObject(minioMetaMultipartBucket, uploadIDPath)
 }
 
 // Removes part given by partName belonging to a mulitpart upload from minioMetaBucket
 func (xl xlObjects) removeObjectPart(bucket, object, uploadID, partName string) {
-	curpartPath := path.Join(mpartMetaPrefix, bucket, object, uploadID, partName)
+	curpartPath := path.Join(bucket, object, uploadID, partName)
 	wg := sync.WaitGroup{}
 	for i, disk := range xl.storageDisks {
 		if disk == nil {
@@ -188,7 +194,7 @@ func (xl xlObjects) removeObjectPart(bucket, object, uploadID, partName string) 
 			// Ignoring failure to remove parts that weren't present in CompleteMultipartUpload
 			// requests. xl.json is the authoritative source of truth on which parts constitute
 			// the object. The presence of parts that don't belong in the object doesn't affect correctness.
-			_ = disk.DeleteFile(minioMetaBucket, curpartPath)
+			_ = disk.DeleteFile(minioMetaMultipartBucket, curpartPath)
 		}(i, disk)
 	}
 	wg.Wait()
@@ -196,18 +202,18 @@ func (xl xlObjects) removeObjectPart(bucket, object, uploadID, partName string) 
 
 // statPart - returns fileInfo structure for a successful stat on part file.
 func (xl xlObjects) statPart(bucket, object, uploadID, partName string) (fileInfo FileInfo, err error) {
-	partNamePath := path.Join(mpartMetaPrefix, bucket, object, uploadID, partName)
+	partNamePath := path.Join(bucket, object, uploadID, partName)
 	for _, disk := range xl.getLoadBalancedDisks() {
 		if disk == nil {
 			continue
 		}
-		fileInfo, err = disk.StatFile(minioMetaBucket, partNamePath)
+		fileInfo, err = disk.StatFile(minioMetaMultipartBucket, partNamePath)
 		if err == nil {
 			return fileInfo, nil
 		}
 		err = traceError(err)
 		// For any reason disk was deleted or goes offline we continue to next disk.
-		if isErrIgnored(err, objMetadataOpIgnoredErrs) {
+		if isErrIgnored(err, objMetadataOpIgnoredErrs...) {
 			continue
 		}
 
@@ -218,7 +224,7 @@ func (xl xlObjects) statPart(bucket, object, uploadID, partName string) (fileInf
 }
 
 // commitXLMetadata - commit `xl.json` from source prefix to destination prefix in the given slice of disks.
-func commitXLMetadata(disks []StorageAPI, srcPrefix, dstPrefix string, quorum int) error {
+func commitXLMetadata(disks []StorageAPI, srcBucket, srcPrefix, dstBucket, dstPrefix string, quorum int) error {
 	var wg = &sync.WaitGroup{}
 	var mErrs = make([]error, len(disks))
 
@@ -236,10 +242,10 @@ func commitXLMetadata(disks []StorageAPI, srcPrefix, dstPrefix string, quorum in
 		go func(index int, disk StorageAPI) {
 			defer wg.Done()
 			// Delete any dangling directories.
-			defer disk.DeleteFile(minioMetaBucket, srcPrefix)
+			defer disk.DeleteFile(srcBucket, srcPrefix)
 
 			// Renames `xl.json` from source prefix to destination prefix.
-			rErr := disk.RenameFile(minioMetaBucket, srcJSONFile, minioMetaBucket, dstJSONFile)
+			rErr := disk.RenameFile(srcBucket, srcJSONFile, dstBucket, dstJSONFile)
 			if rErr != nil {
 				mErrs[index] = traceError(rErr)
 				return
@@ -253,15 +259,12 @@ func commitXLMetadata(disks []StorageAPI, srcPrefix, dstPrefix string, quorum in
 	// Do we have write Quorum?.
 	if !isDiskQuorum(mErrs, quorum) {
 		// Delete all `xl.json` successfully renamed.
-		deleteAllXLMetadata(disks, minioMetaBucket, dstPrefix, mErrs)
+		deleteAllXLMetadata(disks, dstBucket, dstPrefix, mErrs)
 		return traceError(errXLWriteQuorum)
 	}
 
-	// List of ignored errors.
-	ignoredErrs := []error{
-		errDiskNotFound,
-		errDiskAccessDenied,
-		errFaultyDisk,
+	if reducedErr := reduceWriteQuorumErrs(mErrs, objectOpIgnoredErrs, quorum); reducedErr != nil {
+		return reducedErr
 	}
-	return reduceErrs(mErrs, ignoredErrs)
+	return nil
 }

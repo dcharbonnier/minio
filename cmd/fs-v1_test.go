@@ -18,7 +18,6 @@ package cmd
 
 import (
 	"bytes"
-	"os"
 	"path/filepath"
 	"testing"
 )
@@ -29,13 +28,13 @@ func TestNewFS(t *testing.T) {
 	// Do not attempt to create this path, the test validates
 	// so that newFSObjects initializes non existing paths
 	// and successfully returns initialized object layer.
-	disk := filepath.Join(os.TempDir(), "minio-"+nextSuffix())
+	disk := filepath.Join(globalTestTmpDir, "minio-"+nextSuffix())
 	defer removeAll(disk)
 
 	// Setup to test errFSDiskFormat.
 	disks := []string{}
 	for i := 0; i < 6; i++ {
-		xlDisk := filepath.Join(os.TempDir(), "minio-"+nextSuffix())
+		xlDisk := filepath.Join(globalTestTmpDir, "minio-"+nextSuffix())
 		defer removeAll(xlDisk)
 		disks = append(disks, xlDisk)
 	}
@@ -45,7 +44,7 @@ func TestNewFS(t *testing.T) {
 		t.Fatal("Uexpected error: ", err)
 	}
 
-	fsStorageDisks, err := initStorageDisks(endpoints, nil)
+	fsStorageDisks, err := initStorageDisks(endpoints)
 	if err != nil {
 		t.Fatal("Uexpected error: ", err)
 	}
@@ -55,17 +54,17 @@ func TestNewFS(t *testing.T) {
 		t.Fatal("Uexpected error: ", err)
 	}
 
-	xlStorageDisks, err := initStorageDisks(endpoints, nil)
+	xlStorageDisks, err := initStorageDisks(endpoints)
 	if err != nil {
 		t.Fatal("Uexpected error: ", err)
 	}
 
 	// Initializes all disks with XL
-	err = waitForFormatDisks(true, endpoints[0], xlStorageDisks)
+	formattedDisks, err := waitForFormatDisks(true, endpoints, xlStorageDisks)
 	if err != nil {
 		t.Fatalf("Unable to format XL %s", err)
 	}
-	_, err = newXLObjects(xlStorageDisks)
+	_, err = newXLObjects(formattedDisks)
 	if err != nil {
 		t.Fatalf("Unable to initialize XL object, %s", err)
 	}
@@ -79,7 +78,7 @@ func TestNewFS(t *testing.T) {
 	}
 
 	for _, testCase := range testCases {
-		if err = waitForFormatDisks(true, endpoints[0], []StorageAPI{testCase.disk}); err != testCase.expectedErr {
+		if _, err = waitForFormatDisks(true, endpoints, []StorageAPI{testCase.disk}); err != testCase.expectedErr {
 			t.Errorf("expected: %s, got :%s", testCase.expectedErr, err)
 		}
 	}
@@ -87,7 +86,7 @@ func TestNewFS(t *testing.T) {
 	if err != errInvalidArgument {
 		t.Errorf("Expecting error invalid argument, got %s", err)
 	}
-	_, err = newFSObjects(xlStorageDisks[0])
+	_, err = newFSObjects(&retryStorage{xlStorageDisks[0]})
 	if err != nil {
 		errMsg := "Unable to recognize backend format, Disk is not in FS format."
 		if err.Error() == errMsg {
@@ -96,44 +95,53 @@ func TestNewFS(t *testing.T) {
 	}
 }
 
-// TestFSShutdown - initialize a new FS object layer then calls Shutdown
-// to check returned results
+// TestFSShutdown - initialize a new FS object layer then calls
+// Shutdown to check returned results
 func TestFSShutdown(t *testing.T) {
-	// Prepare for tests
-	disk := filepath.Join(os.TempDir(), "minio-"+nextSuffix())
-	defer removeAll(disk)
-	obj := initFSObjects(disk, t)
-
-	fs := obj.(fsObjects)
-	fsStorage := fs.storage.(*posix)
+	rootPath, err := newTestConfig("us-east-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer removeAll(rootPath)
 
 	bucketName := "testbucket"
 	objectName := "object"
-	objectContent := "12345"
-
-	obj.MakeBucket(bucketName)
-	sha256sum := ""
-	obj.PutObject(bucketName, objectName, int64(len(objectContent)), bytes.NewReader([]byte(objectContent)), nil, sha256sum)
+	// Create and return an fsObject with its path in the disk
+	prepareTest := func() (fsObjects, string) {
+		disk := filepath.Join(globalTestTmpDir, "minio-"+nextSuffix())
+		obj := initFSObjects(disk, t)
+		fs := obj.(fsObjects)
+		objectContent := "12345"
+		obj.MakeBucket(bucketName)
+		sha256sum := ""
+		obj.PutObject(bucketName, objectName, int64(len(objectContent)), bytes.NewReader([]byte(objectContent)), nil, sha256sum)
+		return fs, disk
+	}
 
 	// Test Shutdown with regular conditions
+	fs, disk := prepareTest()
 	if err := fs.Shutdown(); err != nil {
 		t.Fatal("Cannot shutdown the FS object: ", err)
 	}
+	removeAll(disk)
 
-	// Test Shutdown with faulty disks
+	// Test Shutdown with faulty disk
 	for i := 1; i <= 5; i++ {
+		fs, disk := prepareTest()
+		fs.DeleteObject(bucketName, objectName)
+		fsStorage := fs.storage.(*retryStorage)
 		fs.storage = newNaughtyDisk(fsStorage, map[int]error{i: errFaultyDisk}, nil)
 		if err := fs.Shutdown(); errorCause(err) != errFaultyDisk {
 			t.Fatal(i, ", Got unexpected fs shutdown error: ", err)
 		}
+		removeAll(disk)
 	}
-
 }
 
 // TestFSLoadFormatFS - test loadFormatFS with healty and faulty disks
 func TestFSLoadFormatFS(t *testing.T) {
 	// Prepare for testing
-	disk := filepath.Join(os.TempDir(), "minio-"+nextSuffix())
+	disk := filepath.Join(globalTestTmpDir, "minio-"+nextSuffix())
 	defer removeAll(disk)
 
 	obj := initFSObjects(disk, t)
@@ -151,7 +159,7 @@ func TestFSLoadFormatFS(t *testing.T) {
 		t.Fatal("Should return an error here")
 	}
 	// Loading format file from faulty disk
-	fsStorage := fs.storage.(*posix)
+	fsStorage := fs.storage.(*retryStorage)
 	fs.storage = newNaughtyDisk(fsStorage, nil, errFaultyDisk)
 	_, err = loadFormatFS(fs.storage)
 	if err != errFaultyDisk {
@@ -162,7 +170,7 @@ func TestFSLoadFormatFS(t *testing.T) {
 // TestFSGetBucketInfo - test GetBucketInfo with healty and faulty disks
 func TestFSGetBucketInfo(t *testing.T) {
 	// Prepare for testing
-	disk := filepath.Join(os.TempDir(), "minio-"+nextSuffix())
+	disk := filepath.Join(globalTestTmpDir, "minio-"+nextSuffix())
 	defer removeAll(disk)
 
 	obj := initFSObjects(disk, t)
@@ -187,7 +195,7 @@ func TestFSGetBucketInfo(t *testing.T) {
 	}
 
 	// Loading format file from faulty disk
-	fsStorage := fs.storage.(*posix)
+	fsStorage := fs.storage.(*retryStorage)
 	fs.storage = newNaughtyDisk(fsStorage, nil, errFaultyDisk)
 	_, err = fs.GetBucketInfo(bucketName)
 	if errorCause(err) != errFaultyDisk {
@@ -199,7 +207,7 @@ func TestFSGetBucketInfo(t *testing.T) {
 // TestFSDeleteObject - test fs.DeleteObject() with healthy and corrupted disks
 func TestFSDeleteObject(t *testing.T) {
 	// Prepare for tests
-	disk := filepath.Join(os.TempDir(), "minio-"+nextSuffix())
+	disk := filepath.Join(globalTestTmpDir, "minio-"+nextSuffix())
 	defer removeAll(disk)
 
 	obj := initFSObjects(disk, t)
@@ -229,7 +237,7 @@ func TestFSDeleteObject(t *testing.T) {
 	}
 
 	// Loading format file from faulty disk
-	fsStorage := fs.storage.(*posix)
+	fsStorage := fs.storage.(*retryStorage)
 	fs.storage = newNaughtyDisk(fsStorage, nil, errFaultyDisk)
 	if err := fs.DeleteObject(bucketName, objectName); errorCause(err) != errFaultyDisk {
 		t.Fatal("Unexpected error: ", err)
@@ -240,7 +248,7 @@ func TestFSDeleteObject(t *testing.T) {
 // TestFSDeleteBucket - tests for fs DeleteBucket
 func TestFSDeleteBucket(t *testing.T) {
 	// Prepare for testing
-	disk := filepath.Join(os.TempDir(), "minio-"+nextSuffix())
+	disk := filepath.Join(globalTestTmpDir, "minio-"+nextSuffix())
 	defer removeAll(disk)
 
 	obj := initFSObjects(disk, t)
@@ -268,7 +276,7 @@ func TestFSDeleteBucket(t *testing.T) {
 	obj.MakeBucket(bucketName)
 
 	// Loading format file from faulty disk
-	fsStorage := fs.storage.(*posix)
+	fsStorage := fs.storage.(*retryStorage)
 	for i := 1; i <= 2; i++ {
 		fs.storage = newNaughtyDisk(fsStorage, map[int]error{i: errFaultyDisk}, nil)
 		if err := fs.DeleteBucket(bucketName); errorCause(err) != errFaultyDisk {
@@ -281,7 +289,7 @@ func TestFSDeleteBucket(t *testing.T) {
 // TestFSListBuckets - tests for fs ListBuckets
 func TestFSListBuckets(t *testing.T) {
 	// Prepare for tests
-	disk := filepath.Join(os.TempDir(), "minio-"+nextSuffix())
+	disk := filepath.Join(globalTestTmpDir, "minio-"+nextSuffix())
 	defer removeAll(disk)
 
 	obj := initFSObjects(disk, t)
@@ -307,7 +315,7 @@ func TestFSListBuckets(t *testing.T) {
 	}
 
 	// Test ListBuckets with faulty disks
-	fsStorage := fs.storage.(*posix)
+	fsStorage := fs.storage.(*retryStorage)
 	for i := 1; i <= 2; i++ {
 		fs.storage = newNaughtyDisk(fsStorage, nil, errFaultyDisk)
 		if _, err := fs.ListBuckets(); errorCause(err) != errFaultyDisk {
@@ -319,7 +327,7 @@ func TestFSListBuckets(t *testing.T) {
 
 // TestFSHealObject - tests for fs HealObject
 func TestFSHealObject(t *testing.T) {
-	disk := filepath.Join(os.TempDir(), "minio-"+nextSuffix())
+	disk := filepath.Join(globalTestTmpDir, "minio-"+nextSuffix())
 	defer removeAll(disk)
 
 	obj := initFSObjects(disk, t)
@@ -331,7 +339,7 @@ func TestFSHealObject(t *testing.T) {
 
 // TestFSListObjectHeal - tests for fs ListObjectHeals
 func TestFSListObjectsHeal(t *testing.T) {
-	disk := filepath.Join(os.TempDir(), "minio-"+nextSuffix())
+	disk := filepath.Join(globalTestTmpDir, "minio-"+nextSuffix())
 	defer removeAll(disk)
 
 	obj := initFSObjects(disk, t)

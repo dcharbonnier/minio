@@ -17,19 +17,19 @@
 package cmd
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"net/http"
 
+	humanize "github.com/dustin/go-humanize"
 	mux "github.com/gorilla/mux"
 	"github.com/minio/minio-go/pkg/set"
 	"github.com/minio/minio/pkg/wildcard"
 )
 
 // maximum supported access policy size.
-const maxAccessPolicySize = 20 * 1024 // 20KiB.
+const maxAccessPolicySize = 20 * humanize.KiByte
 
 // Verify if a given action is valid for the url path based on the
 // existing bucket access policy.
@@ -50,17 +50,10 @@ func bucketPolicyEvalStatements(action string, resource string, conditions map[s
 
 // Verify if action, resource and conditions match input policy statement.
 func bucketPolicyMatchStatement(action string, resource string, conditions map[string]set.StringSet, statement policyStatement) bool {
-	// Verify if action matches.
-	if bucketPolicyActionMatch(action, statement) {
-		// Verify if resource matches.
-		if bucketPolicyResourceMatch(resource, statement) {
-			// Verify if condition matches.
-			if bucketPolicyConditionMatch(conditions, statement) {
-				return true
-			}
-		}
-	}
-	return false
+	// Verify if action, resource and condition match in given statement.
+	return (bucketPolicyActionMatch(action, statement) &&
+		bucketPolicyResourceMatch(resource, statement) &&
+		bucketPolicyConditionMatch(conditions, statement))
 }
 
 // Verify if given action matches with policy statement.
@@ -132,15 +125,21 @@ func (api objectAPIHandlers) PutBucketPolicyHandler(w http.ResponseWriter, r *ht
 		return
 	}
 
-	// PutBucketPolicy does not support bucket policies, use checkAuth to validate signature.
-	if s3Error := checkAuth(r); s3Error != ErrNone {
-		errorIf(errSignatureMismatch, dumpRequest(r))
+	if s3Error := checkRequestAuthType(r, "", "", serverConfig.GetRegion()); s3Error != ErrNone {
 		writeErrorResponse(w, r, s3Error, r.URL.Path)
 		return
 	}
 
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
+
+	// Before proceeding validate if bucket exists.
+	_, err := objAPI.GetBucketInfo(bucket)
+	if err != nil {
+		errorIf(err, "Unable to find bucket info.")
+		writeErrorResponse(w, r, toAPIErrorCode(err), r.URL.Path)
+		return
+	}
 
 	// If Content-Length is unknown or zero, deny the
 	// request. PutBucketPolicy always needs a Content-Length if
@@ -166,70 +165,15 @@ func (api objectAPIHandlers) PutBucketPolicyHandler(w http.ResponseWriter, r *ht
 		writeErrorResponse(w, r, toAPIErrorCode(err), r.URL.Path)
 		return
 	}
-	// Parse bucket policy.
-	var policy = &bucketPolicy{}
-	err = parseBucketPolicy(bytes.NewReader(policyBytes), policy)
-	if err != nil {
-		errorIf(err, "Unable to parse bucket policy.")
-		writeErrorResponse(w, r, ErrInvalidPolicyDocument, r.URL.Path)
-		return
-	}
 
-	// Parse check bucket policy.
-	if s3Error := checkBucketPolicyResources(bucket, policy); s3Error != ErrNone {
+	// Parse validate and save bucket policy.
+	if s3Error := parseAndPersistBucketPolicy(bucket, policyBytes, objAPI); s3Error != ErrNone {
 		writeErrorResponse(w, r, s3Error, r.URL.Path)
-		return
-	}
-
-	// Save bucket policy.
-	if err = persistAndNotifyBucketPolicyChange(bucket, policyChange{false, policy}, objAPI); err != nil {
-		switch err.(type) {
-		case BucketNameInvalid:
-			writeErrorResponse(w, r, ErrInvalidBucketName, r.URL.Path)
-		default:
-			writeErrorResponse(w, r, ErrInternalError, r.URL.Path)
-		}
 		return
 	}
 
 	// Success.
 	writeSuccessNoContent(w)
-}
-
-// persistAndNotifyBucketPolicyChange - takes a policyChange argument,
-// persists it to storage, and notify nodes in the cluster about the
-// change. In-memory state is updated in response to the notification.
-func persistAndNotifyBucketPolicyChange(bucket string, pCh policyChange, objAPI ObjectLayer) error {
-	// Verify if bucket actually exists. FIXME: Ideally this check
-	// should not be used but is kept here to error out for
-	// invalid and non-existent buckets.
-	if err := isBucketExist(bucket, objAPI); err != nil {
-		return err
-	}
-
-	// Acquire a write lock on bucket before modifying its
-	// configuration.
-	opsID := getOpsID()
-	nsMutex.Lock(bucket, "", opsID)
-	// Release lock after notifying peers
-	defer nsMutex.Unlock(bucket, "", opsID)
-
-	if pCh.IsRemove {
-		if err := removeBucketPolicy(bucket, objAPI); err != nil {
-			return err
-		}
-	} else {
-		if pCh.BktPolicy == nil {
-			return errInvalidArgument
-		}
-		if err := writeBucketPolicy(bucket, objAPI, pCh.BktPolicy); err != nil {
-			return err
-		}
-	}
-
-	// Notify all peers (including self) to update in-memory state
-	S3PeersUpdateBucketPolicy(bucket, pCh)
-	return nil
 }
 
 // DeleteBucketPolicyHandler - DELETE Bucket policy
@@ -243,9 +187,7 @@ func (api objectAPIHandlers) DeleteBucketPolicyHandler(w http.ResponseWriter, r 
 		return
 	}
 
-	// DeleteBucketPolicy does not support bucket policies, use checkAuth to validate signature.
-	if s3Error := checkAuth(r); s3Error != ErrNone {
-		errorIf(errSignatureMismatch, dumpRequest(r))
+	if s3Error := checkRequestAuthType(r, "", "", serverConfig.GetRegion()); s3Error != ErrNone {
 		writeErrorResponse(w, r, s3Error, r.URL.Path)
 		return
 	}
@@ -253,12 +195,18 @@ func (api objectAPIHandlers) DeleteBucketPolicyHandler(w http.ResponseWriter, r 
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
 
+	// Before proceeding validate if bucket exists.
+	_, err := objAPI.GetBucketInfo(bucket)
+	if err != nil {
+		errorIf(err, "Unable to find bucket info.")
+		writeErrorResponse(w, r, toAPIErrorCode(err), r.URL.Path)
+		return
+	}
+
 	// Delete bucket access policy, by passing an empty policy
 	// struct.
 	if err := persistAndNotifyBucketPolicyChange(bucket, policyChange{true, nil}, objAPI); err != nil {
 		switch err.(type) {
-		case BucketNameInvalid:
-			writeErrorResponse(w, r, ErrInvalidBucketName, r.URL.Path)
 		case BucketPolicyNotFound:
 			writeErrorResponse(w, r, ErrNoSuchBucketPolicy, r.URL.Path)
 		default:
@@ -282,9 +230,7 @@ func (api objectAPIHandlers) GetBucketPolicyHandler(w http.ResponseWriter, r *ht
 		return
 	}
 
-	// GetBucketPolicy does not support bucket policies, use checkAuth to validate signature.
-	if s3Error := checkAuth(r); s3Error != ErrNone {
-		errorIf(errSignatureMismatch, dumpRequest(r))
+	if s3Error := checkRequestAuthType(r, "", "", serverConfig.GetRegion()); s3Error != ErrNone {
 		writeErrorResponse(w, r, s3Error, r.URL.Path)
 		return
 	}
@@ -292,13 +238,19 @@ func (api objectAPIHandlers) GetBucketPolicyHandler(w http.ResponseWriter, r *ht
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
 
+	// Before proceeding validate if bucket exists.
+	_, err := objAPI.GetBucketInfo(bucket)
+	if err != nil {
+		errorIf(err, "Unable to find bucket info.")
+		writeErrorResponse(w, r, toAPIErrorCode(err), r.URL.Path)
+		return
+	}
+
 	// Read bucket access policy.
 	policy, err := readBucketPolicy(bucket, objAPI)
 	if err != nil {
 		errorIf(err, "Unable to read bucket policy.")
 		switch err.(type) {
-		case BucketNameInvalid:
-			writeErrorResponse(w, r, ErrInvalidBucketName, r.URL.Path)
 		case BucketPolicyNotFound:
 			writeErrorResponse(w, r, ErrNoSuchBucketPolicy, r.URL.Path)
 		default:

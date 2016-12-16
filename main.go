@@ -14,7 +14,13 @@
  * limitations under the License.
  */
 
-package main
+/*
+ * Below main package has canonical imports for 'go get' and 'go build'
+ * to work with all other clones of github.com/minio/minio repository. For
+ * more information refer https://golang.org/doc/go1.4#canonicalimports
+ */
+
+package main // import "github.com/minio/minio"
 
 import minio "github.com/minio/minio/cmd"
 

@@ -16,7 +16,60 @@
 
 package cmd
 
-import "testing"
+import (
+	"net/url"
+	"reflect"
+	"testing"
+)
+
+// Tests and validates the output for heal endpoint.
+func TestGetHealEndpoint(t *testing.T) {
+	// Test for a SSL scheme.
+	tls := true
+	hURL := getHealEndpoint(tls, &url.URL{
+		Scheme: "http",
+		Host:   "localhost:9000",
+	})
+	sHURL := &url.URL{
+		Scheme: "https",
+		Host:   "localhost:9000",
+	}
+	if !reflect.DeepEqual(hURL, sHURL) {
+		t.Fatalf("Expected %#v, but got %#v", sHURL, hURL)
+	}
+
+	// Test a non-TLS scheme.
+	tls = false
+	hURL = getHealEndpoint(tls, &url.URL{
+		Scheme: "https",
+		Host:   "localhost:9000",
+	})
+	sHURL = &url.URL{
+		Scheme: "http",
+		Host:   "localhost:9000",
+	}
+	if !reflect.DeepEqual(hURL, sHURL) {
+		t.Fatalf("Expected %#v, but got %#v", sHURL, hURL)
+	}
+
+	// FIXME(GLOBAL): purposefully Host is left empty because
+	// we need to bring in safe handling on global values
+	// add a proper test case here once that happens.
+	/*
+		tls = false
+		hURL = getHealEndpoint(tls, &url.URL{
+			Path: "/export",
+		})
+		sHURL = &url.URL{
+			Scheme: "http",
+			Host:   "",
+		}
+		globalMinioAddr = ""
+		if !reflect.DeepEqual(hURL, sHURL) {
+			t.Fatalf("Expected %#v, but got %#v", sHURL, hURL)
+		}
+	*/
+}
 
 // Tests heal message to be correct and properly formatted.
 func TestHealMsg(t *testing.T) {
@@ -32,42 +85,47 @@ func TestHealMsg(t *testing.T) {
 	nilDisks[5] = nil
 	authErrs := make([]error, len(storageDisks))
 	authErrs[5] = errAuthentication
+	endpointURL, err := url.Parse("http://10.1.10.1:9000")
+	if err != nil {
+		t.Fatal("Unexpected error:", err)
+	}
+	endpointURLs := make([]*url.URL, len(storageDisks))
+	for idx := 0; idx < len(endpointURLs); idx++ {
+		endpointURLs[idx] = endpointURL
+	}
+
 	testCases := []struct {
-		endPoint     string
+		endPoints    []*url.URL
 		storageDisks []StorageAPI
 		serrs        []error
 	}{
 		// Test - 1 for valid disks and errors.
 		{
-			endPoint:     "http://10.1.10.1:9000",
+			endPoints:    endpointURLs,
 			storageDisks: storageDisks,
 			serrs:        errs,
 		},
 		// Test - 2 for one of the disks is nil.
 		{
-			endPoint:     "http://10.1.10.1:9000",
+			endPoints:    endpointURLs,
 			storageDisks: nilDisks,
 			serrs:        errs,
 		},
 		// Test - 3 for one of the errs is authentication.
 		{
-			endPoint:     "http://10.1.10.1:9000",
+			endPoints:    endpointURLs,
 			storageDisks: nilDisks,
 			serrs:        authErrs,
 		},
 	}
 	for i, testCase := range testCases {
-		msg := getHealMsg(testCase.endPoint, testCase.storageDisks)
+		msg := getHealMsg(testCase.endPoints, testCase.storageDisks)
 		if msg == "" {
 			t.Fatalf("Test: %d Unable to get heal message.", i+1)
 		}
-		msg = getRegularMsg(testCase.storageDisks)
+		msg = getStorageInitMsg("init", testCase.endPoints, testCase.storageDisks)
 		if msg == "" {
 			t.Fatalf("Test: %d Unable to get regular message.", i+1)
-		}
-		msg = getFormatMsg(testCase.storageDisks)
-		if msg == "" {
-			t.Fatalf("Test: %d Unable to get format message.", i+1)
 		}
 		msg = getConfigErrMsg(testCase.storageDisks, testCase.serrs)
 		if msg == "" {
